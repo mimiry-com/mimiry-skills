@@ -1,0 +1,149 @@
+{
+  "skill_name": "mimiry-compute",
+  "evals": [
+    {
+      "id": 0,
+      "prompt": "Check if I have any running sessions on Mimiry and show me my current balance. My SSH key is at ~/.ssh/mimiry_softlaunch_vibe_test",
+      "expected_output": "Should authenticate using the bundled auth script, then call both /sessions and /balance endpoints, displaying results clearly",
+      "files": [],
+      "assertions": [
+        {
+          "name": "uses_bundled_auth_script",
+          "type": "contains",
+          "description": "Uses the bundled mimiry-auth.sh script (not hand-rolled auth)",
+          "check": "commands.sh contains 'mimiry-auth.sh'"
+        },
+        {
+          "name": "correct_ssh_key_path",
+          "type": "contains",
+          "description": "Uses the correct SSH key path from the prompt",
+          "check": "commands.sh contains 'mimiry_softlaunch_vibe_test'"
+        },
+        {
+          "name": "calls_sessions_endpoint",
+          "type": "contains",
+          "description": "Calls the /sessions endpoint to list sessions",
+          "check": "commands.sh contains '/sessions'"
+        },
+        {
+          "name": "calls_balance_endpoint",
+          "type": "contains",
+          "description": "Calls the /balance endpoint to check balance",
+          "check": "commands.sh contains '/balance'"
+        },
+        {
+          "name": "uses_bearer_token",
+          "type": "contains",
+          "description": "Uses Bearer token authentication for API calls",
+          "check": "commands.sh contains 'Bearer'"
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "prompt": "I want to run a PyTorch training job on a GPU on Mimiry. Just use the standard nvidia pytorch image and run a simple MNIST training. My SSH key is ~/.ssh/mimiry_softlaunch_vibe_test",
+      "expected_output": "Should generate a complete job script using pytorch image with MNIST training command",
+      "files": [],
+      "assertions": [
+        {
+          "name": "uses_bundled_auth",
+          "type": "contains",
+          "description": "Uses the bundled auth script for authentication",
+          "check": "run_job.sh contains 'mimiry-auth.sh'"
+        },
+        {
+          "name": "uses_pytorch_image",
+          "type": "contains",
+          "description": "Uses an NVIDIA PyTorch container image",
+          "check": "run_job.sh contains 'pytorch'"
+        },
+        {
+          "name": "creates_session",
+          "type": "contains",
+          "description": "Creates a session via POST to /sessions",
+          "check": "run_job.sh contains 'POST' and '/sessions'"
+        },
+        {
+          "name": "includes_ssh_public_key",
+          "type": "contains",
+          "description": "Includes ssh_public_key in session creation payload",
+          "check": "run_job.sh contains 'ssh_public_key'"
+        },
+        {
+          "name": "sets_auto_terminate",
+          "type": "contains",
+          "description": "Sets auto_terminate to true for batch job",
+          "check": "run_job.sh contains 'auto_terminate'"
+        },
+        {
+          "name": "includes_polling_loop",
+          "type": "contains",
+          "description": "Includes a polling loop to wait for session to be running",
+          "check": "run_job.sh contains 'while' or 'poll' or 'sleep'"
+        },
+        {
+          "name": "includes_ssh_command",
+          "type": "contains",
+          "description": "Shows SSH connection command once session is running",
+          "check": "run_job.sh contains 'ssh -i' or 'ssh.host'"
+        },
+        {
+          "name": "has_error_handling",
+          "type": "contains",
+          "description": "Includes error handling for common failure modes",
+          "check": "run_job.sh contains 'failed' or 'error' or 'Error'"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I want to launch an interactive GPU session on Mimiry that I can SSH into for experimentation. I need a CUDA environment. My key is at ~/.ssh/mimiry_softlaunch_vibe_test",
+      "expected_output": "Should create interactive session with CUDA image, no command, auto_terminate false, and show SSH command",
+      "files": [],
+      "assertions": [
+        {
+          "name": "uses_bundled_auth",
+          "type": "contains",
+          "description": "Uses the bundled auth script for authentication",
+          "check": "run_job.sh contains 'mimiry-auth.sh'"
+        },
+        {
+          "name": "uses_cuda_image",
+          "type": "contains",
+          "description": "Uses an NVIDIA CUDA container image",
+          "check": "run_job.sh contains 'cuda'"
+        },
+        {
+          "name": "no_command_or_null_command",
+          "type": "check",
+          "description": "Does NOT include a command field, or sets it to null (interactive session)",
+          "check": "run_job.sh should either omit 'command' from the JSON payload or set it to null"
+        },
+        {
+          "name": "auto_terminate_false",
+          "type": "contains",
+          "description": "Sets auto_terminate to false for interactive session",
+          "check": "run_job.sh contains 'auto_terminate.*false' or '\"auto_terminate\": false'"
+        },
+        {
+          "name": "ssh_enabled",
+          "type": "contains",
+          "description": "Enables SSH access",
+          "check": "run_job.sh contains 'ssh_enabled'"
+        },
+        {
+          "name": "shows_ssh_connection",
+          "type": "contains",
+          "description": "Displays SSH connection command to the user",
+          "check": "run_job.sh contains 'ssh -i' or 'ssh.host' or 'SSH_HOST'"
+        },
+        {
+          "name": "includes_terminate_reminder",
+          "type": "contains",
+          "description": "Reminds user to terminate when done (billing concern)",
+          "check": "run_job.sh or explanation.md mentions terminating or billing"
+        }
+      ]
+    }
+  ]
+}
