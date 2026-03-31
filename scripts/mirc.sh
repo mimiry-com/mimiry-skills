@@ -175,16 +175,22 @@ cmd_ssh() {
     ensure_token
     resolve_key
 
-    local resp host user
+    local resp host user port
     resp=$(api_get "/sessions/$1") || die "failed to get session details"
     host=$(echo "$resp" | jq -r '.ssh.host // empty')
     user=$(echo "$resp" | jq -r '.ssh.username // empty')
+    port=$(echo "$resp" | jq -r '.ssh.port // empty')
 
     [ -n "$host" ] || die "session $1 has no SSH host (status: $(echo "$resp" | jq -r '.status'))"
     [ -n "$user" ] || die "session $1 has no SSH username"
 
-    echo "Connecting to $user@$host ..." >&2
-    exec ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "${user}@${host}"
+    local port_args=()
+    if [ -n "$port" ] && [ "$port" != "22" ]; then
+        port_args=(-p "$port")
+    fi
+
+    echo "Connecting to $user@$host (port ${port:-22}) ..." >&2
+    exec ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "${port_args[@]+"${port_args[@]}"}" "${user}@${host}"
 }
 
 cmd_terminate() {
