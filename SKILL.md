@@ -63,7 +63,7 @@ The algorithm has several non-obvious details (message format, namespace,
 file-based signing) that are easy to get wrong.
 
 ```bash
-source /home/$USER/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path>
+source $HOME/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path>
 # Exports: MIMIRY_TOKEN, MIMIRY_API
 ```
 
@@ -90,25 +90,25 @@ Every API call must be chained with `source` in a single Bash invocation:
 
 **Check balance** (do this before creating sessions):
 ```bash
-source /home/$USER/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
+source $HOME/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
   curl -s "${MIMIRY_API}/balance" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .
 ```
 
 **List sessions:**
 ```bash
-source /home/$USER/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
+source $HOME/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
   curl -s "${MIMIRY_API}/sessions" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .
 ```
 
 **Get session details:**
 ```bash
-source /home/$USER/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
+source $HOME/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
   curl -s "${MIMIRY_API}/sessions/$SESSION_ID" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .
 ```
 
 **Get logs** (session must be `running`):
 ```bash
-source /home/$USER/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
+source $HOME/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
   curl -s "${MIMIRY_API}/sessions/$SESSION_ID/logs?tail=50" \
     -H "Authorization: Bearer $MIMIRY_TOKEN" | jq -r '.logs'
 ```
@@ -117,20 +117,20 @@ source /home/$USER/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key
 
 **Terminate session:**
 ```bash
-source /home/$USER/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
+source $HOME/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
   curl -s -X DELETE "${MIMIRY_API}/sessions/$SESSION_ID" \
     -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .
 ```
 
 **Check quota:**
 ```bash
-source /home/$USER/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
+source $HOME/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
   curl -s "${MIMIRY_API}/quota" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .
 ```
 
 **Transaction history:**
 ```bash
-source /home/$USER/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
+source $HOME/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
   curl -s "${MIMIRY_API}/transactions" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .
 ```
 
@@ -179,7 +179,7 @@ until running, and print management commands per "After Session Creation".
 Regardless of how decisions were made, the session creation call looks like:
 
 ```bash
-source /home/$USER/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
+source $HOME/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
   PUB_KEY=$(cat "<ssh_key_path>.pub") && \
   curl -s -X POST "${MIMIRY_API}/sessions" \
     -H "Authorization: Bearer $MIMIRY_TOKEN" \
@@ -230,7 +230,7 @@ On error at any stage → state:failed or state:provision_failed
 Poll every 5 seconds until `started` (agent-internal, not user-facing).
 The entire loop MUST be in a single Bash call that starts with `source`:
 ```bash
-source /home/$USER/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
+source $HOME/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
   while true; do
     RESP=$(curl -s "${MIMIRY_API}/sessions/$SESSION_ID" \
       -H "Authorization: Bearer $MIMIRY_TOKEN")
@@ -290,12 +290,12 @@ for subsequent calls. If the user has already run a `mirc` command in this
 terminal session, `--key` can be omitted entirely.
 
 The helper script lives at:
-`/home/$USER/.claude/skills/mimiry-compute/scripts/mirc.sh`
+`$HOME/.claude/skills/mimiry-compute/scripts/mirc.sh`
 
 If the user hasn't added it to their PATH, print the full path on first use.
 For convenience, suggest:
 ```bash
-alias mirc='/home/$USER/.claude/skills/mimiry-compute/scripts/mirc.sh'
+alias mirc='$HOME/.claude/skills/mimiry-compute/scripts/mirc.sh'
 ```
 
 ### Alternative: Raw API Commands
@@ -306,7 +306,7 @@ command so the variables are defined:
 
 ```bash
 # Authenticate (sets $MIMIRY_TOKEN for 1 hour, re-run to refresh):
-source /home/$USER/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <key_path>
+source $HOME/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <key_path>
 
 # Check status:
 curl -s "https://softlaunch.mimiry.com/api/compute/v1/sessions/<session_id>" \
