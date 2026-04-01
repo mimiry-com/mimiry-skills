@@ -251,17 +251,15 @@ Creation" section below. Include the SSH command with resolved values:
 ```bash
 # Extract from $RESP (in the same Bash call as the polling loop above):
 SSH_HOST=$(echo "$RESP" | jq -r '.ssh.host')
-SSH_PORT=$(echo "$RESP" | jq -r '.ssh.port')
-SSH_USER=$(echo "$RESP" | jq -r '.ssh.username')
 
 # Then print for the user (with actual values substituted):
-# ssh -i <key_path> -p <port> -o StrictHostKeyChecking=no <user>@<host>
+# ssh -i <key_path> -o StrictHostKeyChecking=no <host>
 # Plus the mirc helper commands — see "After Session Creation"
 ```
 
-> **Note:** SSH sessions now connect via port 2222 through the ssh-proxy,
-> which lands users directly inside their container. Always include
-> `-p <port>` in printed SSH commands (the port comes from the API response).
+> **Note:** SSH sessions connect through the ssh-proxy on port 22 (the
+> default SSH port), which lands users directly inside their container.
+> No special port or username is needed — just `ssh -i <key> <host>`.
 
 ---
 

@@ -182,15 +182,17 @@ cmd_ssh() {
     port=$(echo "$resp" | jq -r '.ssh.port // empty')
 
     [ -n "$host" ] || die "session $1 has no SSH host (status: $(echo "$resp" | jq -r '.status'))"
-    [ -n "$user" ] || die "session $1 has no SSH username"
 
     local port_args=()
     if [ -n "$port" ] && [ "$port" != "22" ]; then
         port_args=(-p "$port")
     fi
 
-    echo "Connecting to $user@$host (port ${port:-22}) ..." >&2
-    exec ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "${port_args[@]+"${port_args[@]}"}" "${user}@${host}"
+    local target="$host"
+    if [ -n "$user" ]; then target="${user}@${host}"; fi
+
+    echo "Connecting to $target (port ${port:-22}) ..." >&2
+    exec ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "${port_args[@]+"${port_args[@]}"}" "$target"
 }
 
 cmd_terminate() {
