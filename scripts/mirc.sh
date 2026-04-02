@@ -35,7 +35,7 @@ Usage: mirc <command> [options]
 
 Commands:
   auth                 Authenticate and print token info
-  list                 List all sessions
+  list  [--state S]    List sessions (filter: started, terminated, etc.)
   status  <id>         Show session status and details
   logs    <id> [-n N]  Get session logs (default: last 50 lines)
   ssh     <id>         SSH into a running session
@@ -49,6 +49,7 @@ Options:
 Examples:
   mirc auth --key ~/.ssh/mimiry
   mirc list
+  mirc list --state started
   mirc status abc123
   mirc logs abc123 -n 100
   mirc ssh abc123
@@ -135,8 +136,19 @@ cmd_auth() {
 }
 
 cmd_list() {
+    local state=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --state|-s) state="${2:?'--state' requires a value}"; shift 2 ;;
+            *)          die "unknown option for list: $1" ;;
+        esac
+    done
     ensure_token
-    api_get "/sessions" | jq .
+    local endpoint="/sessions"
+    if [ -n "$state" ]; then
+        endpoint="/sessions?state=$state"
+    fi
+    api_get "$endpoint" | jq .
 }
 
 cmd_status() {
