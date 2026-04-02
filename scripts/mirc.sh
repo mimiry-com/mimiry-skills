@@ -226,9 +226,12 @@ CMD=""
 CMD_ARGS=()
 
 while [ $# -gt 0 ]; do
-    # Once we have a command, pass everything else through (including flags like -n)
+    # Once we have a command, pass everything else through — except global flags
     if [ -n "$CMD" ]; then
-        CMD_ARGS+=("$1"); shift
+        case "$1" in
+            --key) OPT_KEY="${2:?'--key' requires a path}"; shift 2 ;;
+            *)     CMD_ARGS+=("$1"); shift ;;
+        esac
         continue
     fi
     case "$1" in
