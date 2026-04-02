@@ -204,7 +204,7 @@ cmd_ssh() {
     if [ -n "$user" ]; then target="${user}@${host}"; fi
 
     echo "Connecting to $target (port ${port:-22}) ..." >&2
-    exec ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "${port_args[@]+"${port_args[@]}"}" "$target"
+    exec ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${port_args[@]+"${port_args[@]}"}" "$target"
 }
 
 cmd_terminate() {
