@@ -9,8 +9,6 @@
 #   2. Construct message: {fingerprint}\n{timestamp}\n{nonce}
 #   3. Write to file, sign with ssh-keygen -Y sign -n mimiry-auth
 #   4. Base64-encode the .sig file, exchange for JWT
-set -e
-
 SSH_KEY="${1:?Usage: mimiry-auth.sh <ssh_key_path> [api_base]}"
 API_BASE="${2:-https://softlaunch.mimiry.com}"
 
@@ -55,4 +53,3 @@ fi
 export MIMIRY_TOKEN="$TOKEN"
 export MIMIRY_API="${API_BASE}/api/compute/v1"
 echo "Authenticated (fingerprint: $FINGERPRINT)"
-set +e
