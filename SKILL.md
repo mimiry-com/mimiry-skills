@@ -72,12 +72,15 @@ Tokens expire after 1 hour — re-authenticate if you get 401s.
 **API base:** `https://softlaunch.mimiry.com`
 **Compute prefix:** `/api/compute/v1`
 
-> **CRITICAL — Shell state does not persist between Bash tool calls.**
-> Each time you use the Bash tool, it spawns a **new shell**. Variables
-> exported by `source` in one Bash call do NOT exist in the next one.
-> You MUST chain the `source` command with every API call using `&&` in
-> a **single** Bash invocation. Never run `source` in one Bash call and
-> then use `$MIMIRY_API` / `$MIMIRY_TOKEN` in a separate Bash call.
+> **CRITICAL — All commands MUST be wrapped in `bash -c`.**
+> The Bash tool loads the user's shell profile, which can interfere with
+> command execution. Always wrap the entire command in `bash -c '...'` to
+> run in a clean, non-interactive shell.
+>
+> Shell state does not persist between Bash tool calls. Each call spawns a
+> **new shell**. You MUST include `source` in every `bash -c` invocation.
+> Never run `source` in one Bash call and use `$MIMIRY_API` / `$MIMIRY_TOKEN`
+> in a separate one.
 
 ### Common Operations
 
@@ -86,52 +89,43 @@ Tokens expire after 1 hour — re-authenticate if you get 401s.
 > the variables won't exist in the user's terminal. When printing
 > commands for the user, follow the "After Session Creation" section.
 
-Every API call must be chained with `source` in a single Bash invocation:
+Every API call must be wrapped in `bash -c` with `source` included:
 
 **Check balance** (do this before creating sessions):
 ```bash
-source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
-  curl -s "${MIMIRY_API}/balance" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .
+bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/balance" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
 ```
 
 **List sessions:**
 ```bash
-source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
-  curl -s "${MIMIRY_API}/sessions" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .
+bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/sessions" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
 ```
 
 **Get session details:**
 ```bash
-source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
-  curl -s "${MIMIRY_API}/sessions/$SESSION_ID" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .
+bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/sessions/$SESSION_ID" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
 ```
 
 **Get logs** (session must be `running`):
 ```bash
-source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
-  curl -s "${MIMIRY_API}/sessions/$SESSION_ID/logs?tail=50" \
-    -H "Authorization: Bearer $MIMIRY_TOKEN" | jq -r '.logs'
+bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/sessions/$SESSION_ID/logs?tail=50" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq -r .logs'
 ```
 - HTTP 503 → VM still setting up, retry after `retry_after_seconds`
 - HTTP 409 → session not running, check status first
 
 **Terminate session:**
 ```bash
-source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
-  curl -s -X DELETE "${MIMIRY_API}/sessions/$SESSION_ID" \
-    -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .
+bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && curl -s -X DELETE "${MIMIRY_API}/sessions/$SESSION_ID" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
 ```
 
 **Check quota:**
 ```bash
-source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
-  curl -s "${MIMIRY_API}/quota" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .
+bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/quota" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
 ```
 
 **Transaction history:**
 ```bash
-source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
-  curl -s "${MIMIRY_API}/transactions" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .
+bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/transactions" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
 ```
 
 ---
@@ -174,26 +168,19 @@ until running, and print management commands per "After Session Creation".
 ## Creating the Session
 
 > **Agent-internal code** — do not print this block to the user.
-> Remember: `source` MUST be in the same Bash call as the API request.
+> All commands MUST be wrapped in `bash -c '...'`.
 
 Regardless of how decisions were made, the session creation call looks like:
 
 ```bash
-source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
-  PUB_KEY=$(cat "<ssh_key_path>.pub") && \
-  curl -s -X POST "${MIMIRY_API}/sessions" \
-    -H "Authorization: Bearer $MIMIRY_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d '{
-      "name": "<session_name>",
-      "image": {"uri": "<image_uri>"},
-      "gpu": {"types": ["<gpu_type>"], "count": 1},
-      "ssh_enabled": true,
-      "ssh_public_key": "'"$PUB_KEY"'",
-      "command": "<command_or_null>",
-      "auto_terminate": <true|false>,
-      "environment_vars": {<optional_env_vars>}
-    }' | jq .
+bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && PUB_KEY=$(cat "<ssh_key_path>.pub") && curl -s -X POST "${MIMIRY_API}/sessions" -H "Authorization: Bearer $MIMIRY_TOKEN" -H "Content-Type: application/json" -d '"'"'{"name": "<session_name>", "image": {"uri": "<image_uri>"}, "gpu": {"types": ["<gpu_type>"], "count": 1}, "ssh_enabled": true, "ssh_public_key": "'"'"'"'"'"'"'"'"'$PUB_KEY'"'"'"'"'"'"'"'"'", "command": "<command_or_null>", "auto_terminate": <true|false>}'"'"' | jq .'
+```
+
+**Tip:** The JSON body quoting is complex. A cleaner approach is to build
+the JSON with jq:
+
+```bash
+bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && PUB_KEY=$(cat "<ssh_key_path>.pub") && JSON=$(jq -n --arg name "<session_name>" --arg image "<image_uri>" --arg gpu "<gpu_type>" --arg key "$PUB_KEY" --arg cmd "<command>" '"'"'{name: $name, image: {uri: $image}, gpu: {types: [$gpu], count: 1}, ssh_enabled: true, ssh_public_key: $key, command: $cmd, auto_terminate: false}'"'"') && curl -s -X POST "${MIMIRY_API}/sessions" -H "Authorization: Bearer $MIMIRY_TOKEN" -H "Content-Type: application/json" -d "$JSON" | jq .'
 ```
 
 **Field guide:**
@@ -228,28 +215,16 @@ On error at any stage → state:failed or state:provision_failed
 ```
 
 Poll every 5 seconds until `started` (agent-internal, not user-facing).
-The entire loop MUST be in a single Bash call that starts with `source`:
+The entire loop MUST be in a single `bash -c` call:
 ```bash
-source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && \
-  while true; do
-    RESP=$(curl -s "${MIMIRY_API}/sessions/$SESSION_ID" \
-      -H "Authorization: Bearer $MIMIRY_TOKEN")
-    STATE=$(echo "$RESP" | jq -r '.state')
-    echo "State: $STATE"
-    case "$STATE" in
-      started) break ;;
-      failed|provision_failed) echo "FAILED: $(echo $RESP | jq -r '.error')"; break ;;
-      completed|terminated|stopped) echo "Session ended unexpectedly"; break ;;
-    esac
-    sleep 5
-  done
+bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && while true; do RESP=$(curl -s "${MIMIRY_API}/sessions/$SESSION_ID" -H "Authorization: Bearer $MIMIRY_TOKEN"); STATE=$(echo "$RESP" | jq -r .state); STATUS=$(echo "$RESP" | jq -r .status); echo "State: $STATE | Status: $STATUS"; case "$STATE" in started) break ;; failed|provision_failed) echo "FAILED: $(echo $RESP | jq -r .error)"; break ;; completed|terminated|stopped) echo "Session ended unexpectedly"; break ;; esac; sleep 5; done'
 ```
 
 Once running, extract SSH details from `$RESP` (still in the same shell)
 and then print **user-facing management commands** per the "After Session
 Creation" section below. Include the SSH command with resolved values:
 ```bash
-# Extract from $RESP (in the same Bash call as the polling loop above):
+# Extract from $RESP (in the same bash -c call as the polling loop above):
 SSH_HOST=$(echo "$RESP" | jq -r '.ssh.host')
 
 # Then print for the user (with actual values substituted):
@@ -349,8 +324,9 @@ Tokens last 1 hour. When printing post-session commands, mention:
 
 ## Tips
 
-- Always `source` the auth script AND the API call in the **same** Bash tool
-  invocation (chained with `&&`). Shell state does not persist between calls.
+- **ALWAYS wrap commands in `bash -c '...'`** — the Bash tool's default
+  shell loads user profile scripts that can interfere with command execution.
+  `bash -c` runs in a clean non-interactive shell, avoiding these issues.
 - The same SSH key authenticates with the API and provides session SSH access
 - Billing runs from provisioning to termination — remind users to terminate
   idle sessions
