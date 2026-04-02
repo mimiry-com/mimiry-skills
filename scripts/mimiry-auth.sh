@@ -55,3 +55,4 @@ fi
 export MIMIRY_TOKEN="$TOKEN"
 export MIMIRY_API="${API_BASE}/api/compute/v1"
 echo "Authenticated (fingerprint: $FINGERPRINT)"
+set +e

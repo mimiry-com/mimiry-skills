@@ -214,12 +214,12 @@ source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && 
 
 Two dimensions:
 - **`state`** (durable milestone): `submitted → provisioned → started → completed/failed/stopped → terminated`
-- **`status`** (transient): `provisioning`, `starting_container`, `running`, `stopping_container`, `terminating`
+- **`status`** (transient): `provisioning`, `pulling_image`, `starting_container`, `running`, `stopping_container`, `terminating`
 
 ```
-POST /sessions → state:submitted → state:provisioned → state:started → state:completed
-                 status:provisioning  status:starting_container  status:running      ↓
-                                                                               state:terminated
+POST /sessions → state:submitted → state:provisioned                            → state:started → state:completed
+                 status:provisioning  status:pulling_image  status:starting_container  status:running      ↓
+                                                                                                     state:terminated
                                               DELETE /sessions/{id}
                                                      ↓
                                               state:stopped → state:terminated
