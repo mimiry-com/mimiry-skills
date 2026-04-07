@@ -1,16 +1,37 @@
 ---
-name: mimiry-compute
+name: mimiry-softlaunch
 description: >
-  Launch and manage GPU compute sessions on the Mimiry platform. Use this skill
-  whenever the user wants to run a GPU job, start a compute session, train a
-  model on Mimiry, launch a container on a GPU, check their Mimiry balance,
-  manage running sessions, or build a compute job script. Also triggers when the
-  user mentions Mimiry compute, GPU sessions, SSH-ing into a session, or asks to
-  "run this on a GPU" or "launch a training job". Covers both quick one-liners
-  and interactive job-building workflows.
+  Early-access skill for Mimiry's softlaunch GPU compute platform. Use this
+  skill whenever the user wants to run a GPU job, start a compute session, train
+  a model, launch a container on a GPU, check their balance, manage running
+  sessions, or build a compute job script on the Mimiry softlaunch environment.
+  Also triggers when the user mentions Mimiry softlaunch, Mimiry compute, GPU
+  sessions, SSH-ing into a session, or asks to "run this on a GPU" or "launch a
+  training job". Covers both quick one-liners and interactive job-building
+  workflows. This is the softlaunch (early beta) version — the API and features
+  may change.
 ---
 
-# Mimiry Compute — Build, Launch & Manage GPU Jobs
+# Mimiry Softlaunch — GPU Compute (Early Beta)
+
+> **Softlaunch notice:** This skill targets the Mimiry softlaunch environment
+> (`softlaunch.mimiry.com`). It is an early beta — APIs, pricing, and features
+> may change without notice. Report issues to the Mimiry team.
+
+## Locating Skill Scripts
+
+This skill bundles helper scripts in its `scripts/` subdirectory. Before
+running any commands, locate the skill installation directory by checking
+these paths (in order):
+
+1. `~/.agents/skills/mimiry-softlaunch/` (npx skills standard location)
+2. `~/.claude/skills/mimiry-softlaunch/` (Claude Code symlink)
+
+Use whichever exists. In all command examples below, **`SKILL_DIR`** is a
+placeholder for this resolved path — substitute the actual path when
+executing commands.
+
+---
 
 This skill covers two concerns:
 
@@ -35,7 +56,7 @@ normalizes automatically.
 
 1. **Generate a key** (if they don't have one):
    ```bash
-   ssh-keygen -t ed25519 -f ~/.ssh/mimiry -C "mimiry-compute"
+   ssh-keygen -t ed25519 -f ~/.ssh/mimiry -C "mimiry-softlaunch"
    ```
 2. **Register it on Mimiry** — the user must add the public key
    (`~/.ssh/mimiry.pub`) through the Mimiry portal. There is currently no
@@ -63,7 +84,7 @@ The algorithm has several non-obvious details (message format, namespace,
 file-based signing) that are easy to get wrong.
 
 ```bash
-source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path>
+source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path>
 # Exports: MIMIRY_TOKEN, MIMIRY_API
 ```
 
@@ -93,39 +114,39 @@ Every API call must be wrapped in `bash -c` with `source` included:
 
 **Check balance** (do this before creating sessions):
 ```bash
-bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/balance" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
+bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/balance" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
 ```
 
 **List sessions:**
 ```bash
-bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/sessions" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
+bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/sessions" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
 ```
 
 **Get session details:**
 ```bash
-bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/sessions/$SESSION_ID" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
+bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/sessions/$SESSION_ID" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
 ```
 
 **Get logs** (session must be `running`):
 ```bash
-bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/sessions/$SESSION_ID/logs?tail=50" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq -r .logs'
+bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/sessions/$SESSION_ID/logs?tail=50" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq -r .logs'
 ```
 - HTTP 503 → VM still setting up, retry after `retry_after_seconds`
 - HTTP 409 → session not running, check status first
 
 **Terminate session:**
 ```bash
-bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && curl -s -X DELETE "${MIMIRY_API}/sessions/$SESSION_ID" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
+bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && curl -s -X DELETE "${MIMIRY_API}/sessions/$SESSION_ID" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
 ```
 
 **Check quota:**
 ```bash
-bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/quota" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
+bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/quota" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
 ```
 
 **Transaction history:**
 ```bash
-bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/transactions" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
+bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/transactions" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
 ```
 
 ---
@@ -173,14 +194,14 @@ until running, and print management commands per "After Session Creation".
 Regardless of how decisions were made, the session creation call looks like:
 
 ```bash
-bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && PUB_KEY=$(cat "<ssh_key_path>.pub") && curl -s -X POST "${MIMIRY_API}/sessions" -H "Authorization: Bearer $MIMIRY_TOKEN" -H "Content-Type: application/json" -d '"'"'{"name": "<session_name>", "image": {"uri": "<image_uri>"}, "gpu": {"types": ["<gpu_type>"], "count": 1}, "ssh_enabled": true, "ssh_public_key": "'"'"'"'"'"'"'"'"'$PUB_KEY'"'"'"'"'"'"'"'"'", "command": "<command_or_null>", "auto_terminate": <true|false>}'"'"' | jq .'
+bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && PUB_KEY=$(cat "<ssh_key_path>.pub") && curl -s -X POST "${MIMIRY_API}/sessions" -H "Authorization: Bearer $MIMIRY_TOKEN" -H "Content-Type: application/json" -d '"'"'{"name": "<session_name>", "image": {"uri": "<image_uri>"}, "gpu": {"types": ["<gpu_type>"], "count": 1}, "ssh_enabled": true, "ssh_public_key": "'"'"'"'"'"'"'"'"'$PUB_KEY'"'"'"'"'"'"'"'"'", "command": "<command_or_null>", "auto_terminate": <true|false>}'"'"' | jq .'
 ```
 
 **Tip:** The JSON body quoting is complex. A cleaner approach is to build
 the JSON with jq:
 
 ```bash
-bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && PUB_KEY=$(cat "<ssh_key_path>.pub") && JSON=$(jq -n --arg name "<session_name>" --arg image "<image_uri>" --arg gpu "<gpu_type>" --arg key "$PUB_KEY" --arg cmd "<command>" '"'"'{name: $name, image: {uri: $image}, gpu: {types: [$gpu], count: 1}, ssh_enabled: true, ssh_public_key: $key, command: $cmd, auto_terminate: false}'"'"') && curl -s -X POST "${MIMIRY_API}/sessions" -H "Authorization: Bearer $MIMIRY_TOKEN" -H "Content-Type: application/json" -d "$JSON" | jq .'
+bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && PUB_KEY=$(cat "<ssh_key_path>.pub") && JSON=$(jq -n --arg name "<session_name>" --arg image "<image_uri>" --arg gpu "<gpu_type>" --arg key "$PUB_KEY" --arg cmd "<command>" '"'"'{name: $name, image: {uri: $image}, gpu: {types: [$gpu], count: 1}, ssh_enabled: true, ssh_public_key: $key, command: $cmd, auto_terminate: false}'"'"') && curl -s -X POST "${MIMIRY_API}/sessions" -H "Authorization: Bearer $MIMIRY_TOKEN" -H "Content-Type: application/json" -d "$JSON" | jq .'
 ```
 
 **Field guide:**
@@ -217,7 +238,7 @@ On error at any stage → state:failed or state:provision_failed
 Poll every 5 seconds until `started` (agent-internal, not user-facing).
 The entire loop MUST be in a single `bash -c` call:
 ```bash
-bash -c 'source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <ssh_key_path> && while true; do RESP=$(curl -s "${MIMIRY_API}/sessions/$SESSION_ID" -H "Authorization: Bearer $MIMIRY_TOKEN"); STATE=$(echo "$RESP" | jq -r .state); STATUS=$(echo "$RESP" | jq -r .status); echo "State: $STATE | Status: $STATUS"; case "$STATE" in started) break ;; failed|provision_failed) echo "FAILED: $(echo $RESP | jq -r .error)"; break ;; completed|terminated|stopped) echo "Session ended unexpectedly"; break ;; esac; sleep 5; done'
+bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && while true; do RESP=$(curl -s "${MIMIRY_API}/sessions/$SESSION_ID" -H "Authorization: Bearer $MIMIRY_TOKEN"); STATE=$(echo "$RESP" | jq -r .state); STATUS=$(echo "$RESP" | jq -r .status); echo "State: $STATE | Status: $STATUS"; case "$STATE" in started) break ;; failed|provision_failed) echo "FAILED: $(echo $RESP | jq -r .error)"; break ;; completed|terminated|stopped) echo "Session ended unexpectedly"; break ;; esac; sleep 5; done'
 ```
 
 Once running, extract SSH details from `$RESP` (still in the same shell)
@@ -265,12 +286,12 @@ for subsequent calls. If the user has already run a `mirc` command in this
 terminal session, `--key` can be omitted entirely.
 
 The helper script lives at:
-`~/.claude/skills/mimiry-compute/scripts/mirc.sh`
+`SKILL_DIR/scripts/mirc.sh`
 
 If the user hasn't added it to their PATH, print the full path on first use.
 For convenience, suggest:
 ```bash
-alias mirc='~/.claude/skills/mimiry-compute/scripts/mirc.sh'
+alias mirc='SKILL_DIR/scripts/mirc.sh'
 ```
 
 ### Alternative: Raw API Commands
@@ -281,7 +302,7 @@ command so the variables are defined:
 
 ```bash
 # Authenticate (sets $MIMIRY_TOKEN for 1 hour, re-run to refresh):
-source ~/.claude/skills/mimiry-compute/scripts/mimiry-auth.sh <key_path>
+source SKILL_DIR/scripts/mimiry-auth.sh <key_path>
 
 # Check status:
 curl -s "https://softlaunch.mimiry.com/api/compute/v1/sessions/<session_id>" \
