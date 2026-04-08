@@ -172,7 +172,8 @@ told you (they may have answered several in their initial request):
    - TensorFlow: `nvcr.io/nvidia/tensorflow:24.01-tf2-py3`
    - Plain CUDA: `nvcr.io/nvidia/cuda:12.3.1-devel-ubuntu22.04`
    - Or any public image URI / custom Dockerfile
-3. **GPU type** — default to T4 (cheapest) unless they need more power
+3. **GPU type** — available types are `T4`, `V100`, and `A100`. Default to T4
+   (cheapest) unless the user needs more power
 4. **What to run** — a command/script, or interactive SSH access?
 5. **Session name** — suggest a sensible default based on the image/task
 
@@ -214,7 +215,7 @@ bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && PUB_KEY=$(cat
 | `auto_terminate` | Interactive / long-running | `false` or `{"mode":"never"}` |
 | `auto_terminate` | Only terminate on success | `{"mode":"on_success"}` |
 | `ssh_public_key` | Always required | Contents of `<key>.pub` |
-| `gpu.types` | User doesn't specify | `["T4"]` (cheapest) |
+| `gpu.types` | User doesn't specify | `["T4"]` (cheapest). Valid: `T4`, `V100`, `A100` |
 | `environment_vars` | User needs env config | `{"KEY": "value", ...}` |
 | `billing.account_type` | Org billing | `"org"` + `account_id` |
 
@@ -351,7 +352,8 @@ Tokens last 1 hour. When printing post-session commands, mention:
 - The same SSH key authenticates with the API and provides session SSH access
 - Billing runs from provisioning to termination — remind users to terminate
   idle sessions
-- T4 is the cheapest GPU; suggest it unless the user needs more power
+- Available GPUs: `T4` (cheapest), `V100`, `A100`. Only suggest these three —
+  no other GPU types are enabled on the softlaunch platform
 - When generating scripts for the user, include error handling for common
   failure modes (402 insufficient balance, 429 quota exceeded)
 - **Exploration vs. automation**: Default to `mirc` helper commands for
