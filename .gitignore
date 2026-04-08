@@ -1,0 +1,36 @@
+# 1. Ignore ALL hidden files and directories by default
+.*
+
+!.gitignore
+
+# 2. Allow-list the specific AI/Agent essentials
+!.agents/
+!.agents/**/
+!.github/
+!.vscode/          # Optional: Keep if you share shared snippets/tasks
+!.cursorignore
+!.claudeignore
+!.aiexclude
+
+# 3. Explicitly allow the lockfile (even if it's not a dotfile, it's critical)
+!skills-lock.json
+
+# 4. Re-ignore sensitive or temporary data INSIDE the allowed folders
+.agents/history/
+.agents/logs/
+.agents/cache/
+.agents/user_settings.json
+.agents/**/node_modules/
+.agents/**/__pycache__/
+
+# 5. Standard non-dotfile ignores
+node_modules/
+__pycache__/
+venv/
+.venv/
+*.log
+*.local
+dist/
+build/
+
+
