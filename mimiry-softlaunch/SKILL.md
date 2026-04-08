@@ -110,7 +110,15 @@ Tokens expire after 1 hour — re-authenticate if you get 401s.
 > the variables won't exist in the user's terminal. When printing
 > commands for the user, follow the "After Session Creation" section.
 
-Every API call must be wrapped in `bash -c` with `source` included:
+Every API call must be wrapped in `bash -c` with `source` included.
+
+**Check GPU availability** (public — no auth required):
+```bash
+bash -c 'curl -s "https://softlaunch.mimiry.com/api/compute/v1/availability?gpu_types=T4,V100,A100" | jq .'
+```
+The `gpu_types` parameter is required (comma-separated). Returns per-type
+availability with provider/zone details. Use this as a pre-flight check
+before creating sessions.
 
 **Check balance** (do this before creating sessions):
 ```bash
@@ -173,7 +181,8 @@ told you (they may have answered several in their initial request):
    - Plain CUDA: `nvcr.io/nvidia/cuda:12.3.1-devel-ubuntu22.04`
    - Or any public image URI / custom Dockerfile
 3. **GPU type** — available types are `T4`, `V100`, and `A100`. Default to T4
-   (cheapest) unless the user needs more power
+   (cheapest) unless the user needs more power. Check the `/availability`
+   endpoint to confirm the requested type is available before creating a session
 4. **What to run** — a command/script, or interactive SSH access?
 5. **Session name** — suggest a sensible default based on the image/task
 
