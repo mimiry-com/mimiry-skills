@@ -10,6 +10,7 @@
 #   logs        Get session logs
 #   ssh         SSH into a running session
 #   terminate   Terminate a session
+#   availability Check GPU availability (public, no auth needed)
 #   balance     Show current balance
 #
 # First invocation requires --key <path>. The key path is remembered
@@ -40,6 +41,7 @@ Commands:
   logs    <id> [-n N]  Get session logs (default: last 50 lines)
   ssh     <id>         SSH into a running session
   terminate <id>       Terminate a session
+  availability [gpus]  Check GPU availability (default: T4,V100,A100)
   balance              Show current balance
 
 Options:
@@ -214,6 +216,12 @@ cmd_terminate() {
     echo "Terminate request sent for $1" >&2
 }
 
+cmd_availability() {
+    local gpu_types="${1:-T4,V100,A100}"
+    # Public endpoint — no auth required
+    curl -sf "${API}/availability?gpu_types=${gpu_types}" | jq .
+}
+
 cmd_balance() {
     ensure_token
     api_get "/balance" | jq .
@@ -250,8 +258,9 @@ case "$CMD" in
     status)    cmd_status "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
     logs)      cmd_logs "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
     ssh)       cmd_ssh "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
-    terminate) cmd_terminate "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
-    balance)   cmd_balance "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
+    terminate)    cmd_terminate "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
+    availability) cmd_availability "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
+    balance)      cmd_balance "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
     help)      usage ;;
     *)         die "unknown command: $CMD (run 'mirc --help' for usage)" ;;
 esac
