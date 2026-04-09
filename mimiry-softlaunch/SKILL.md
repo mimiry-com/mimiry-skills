@@ -259,7 +259,7 @@ Creation" section below. Include the SSH command with resolved values:
 SSH_HOST=$(echo "$RESP" | jq -r '.ssh.host')
 
 # Then print for the user (with actual values substituted):
-# ssh -i <key_path> -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null <host>
+# ssh -i <key_path> -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR <host>
 # Plus the mirc helper commands — see "After Session Creation"
 ```
 
