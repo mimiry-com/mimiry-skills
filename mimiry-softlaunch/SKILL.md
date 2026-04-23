@@ -114,11 +114,55 @@ Every API call must be wrapped in `bash -c` with `source` included.
 
 **Check GPU availability** (public — no auth required):
 ```bash
-bash -c 'curl -s "https://softlaunch.mimiry.com/api/compute/v1/availability?gpu_types=T4,V100,A100" | jq .'
+bash -c 'curl -s "https://softlaunch.mimiry.com/api/compute/v1/availability" | jq .'
 ```
-The `gpu_types` parameter is required (comma-separated). Returns per-type
-availability with provider/zone details. Use this as a pre-flight check
-before creating sessions.
+Returns all available GPU models with per-provider pricing and locations.
+Each model includes a `providers` array showing which providers offer it
+and at what locations (e.g. `"verda"` at `"FIN-01"`). Use this as a
+pre-flight check before creating sessions, and to discover valid
+`provider` and `location` values for session creation hints.
+
+Optional query params: `gpu_family=H100,T4`, `min_vram_gb=40`,
+`location=FIN-01`, `available_only=false`, `detail=full`.
+
+**Response structure** (abbreviated):
+```json
+{
+  "gpu_models": [
+    {
+      "name": "T4",
+      "family": "T4",
+      "vram_gb": 16,
+      "available": true,
+      "currency": "EUR",
+      "providers": [
+        { "provider": "verda", "hourly_rate": 0.32, "locations": ["FIN-01"] }
+      ]
+    },
+    {
+      "name": "H100_SXM",
+      "family": "H100",
+      "vram_gb": 80,
+      "available": true,
+      "currency": "EUR",
+      "providers": [
+        { "provider": "verda", "hourly_rate": 2.10, "locations": ["FIN-01"] },
+        { "provider": "acme", "hourly_rate": 2.50, "locations": ["US-EAST-1"] }
+      ]
+    }
+  ]
+}
+```
+
+**Finding the cheapest GPU from a specific provider:** Filter `gpu_models`
+to entries where the `providers` array contains the target provider, then
+sort by that provider's `hourly_rate`. Example using jq:
+```bash
+bash -c 'curl -s "https://softlaunch.mimiry.com/api/compute/v1/availability" | jq --arg p "verda" '"'"'[.gpu_models[] | select(.available) | {name, hourly_rate: ([.providers[] | select(.provider == $p) | .hourly_rate] | first)} | select(.hourly_rate)] | sort_by(.hourly_rate) | first'"'"''
+```
+This returns the cheapest available GPU offered by the given provider
+(name + rate). Use that `name` as `gpu.types[0]` and the provider as
+`gpu.provider` when creating the session.
 
 **Check balance** (do this before creating sessions):
 ```bash
@@ -180,11 +224,19 @@ told you (they may have answered several in their initial request):
    - TensorFlow: `nvcr.io/nvidia/tensorflow:24.01-tf2-py3`
    - Plain CUDA: `nvcr.io/nvidia/cuda:12.3.1-devel-ubuntu22.04`
    - Or any public image URI / custom Dockerfile
-3. **GPU type** — available types are `T4`, `V100`, and `A100`. Default to T4
-   (cheapest) unless the user needs more power. Check the `/availability`
-   endpoint to confirm the requested type is available before creating a session
-4. **What to run** — a command/script, or interactive SSH access?
-5. **Session name** — suggest a sensible default based on the image/task
+3. **GPU type** — check the `/availability` endpoint to see what's currently
+   available. Multiple providers may offer different GPU models at different
+   locations. Default to the cheapest available option unless the user needs
+   more power. Common types include `T4`, `V100`, `A100`, `H100_SXM` — but
+   always verify via `/availability` rather than hardcoding
+4. **Provider/location preference** (optional) — if the user has a preference
+   for a specific provider (e.g. `verda`) or location (e.g. `FIN-01`), these
+   can be passed as hints in `gpu.provider` and `gpu.location`. They are not
+   guaranteed — the system falls back to best available if the preference
+   can't be satisfied. Show available providers/locations from `/availability`
+   if the user asks
+5. **What to run** — a command/script, or interactive SSH access?
+6. **Session name** — suggest a sensible default based on the image/task
 
 Optional (only ask if relevant to what the user described):
 - Environment variables
@@ -214,6 +266,15 @@ the JSON with jq:
 bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && PUB_KEY=$(cat "<ssh_key_path>.pub") && JSON=$(jq -n --arg name "<session_name>" --arg image "<image_uri>" --arg gpu "<gpu_type>" --arg key "$PUB_KEY" --arg cmd "<command>" '"'"'{name: $name, image: {uri: $image}, gpu: {types: [$gpu], count: 1}, ssh_enabled: true, ssh_public_key: $key, command: $cmd, auto_terminate: false}'"'"') && curl -s -X POST "${MIMIRY_API}/sessions" -H "Authorization: Bearer $MIMIRY_TOKEN" -H "Content-Type: application/json" -d "$JSON" | jq .'
 ```
 
+To include provider/location preferences, add them to the `gpu` object:
+```bash
+# ... same as above but with provider/location hints in the jq call:
+JSON=$(jq -n --arg name "..." --arg image "..." --arg gpu "T4" --arg key "$PUB_KEY" --arg provider "verda" --arg location "FIN-01" \
+  '{name: $name, image: {uri: $image}, gpu: {types: [$gpu], count: 1, provider: $provider, location: $location}, ssh_enabled: true, ssh_public_key: $key, auto_terminate: false}')
+```
+Only include `provider` and `location` when the user explicitly requests
+them — they are optional hints.
+
 **Field guide:**
 
 | Field | When | Value |
@@ -224,7 +285,9 @@ bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && PUB_KEY=$(cat
 | `auto_terminate` | Interactive / long-running | `false` or `{"mode":"never"}` |
 | `auto_terminate` | Only terminate on success | `{"mode":"on_success"}` |
 | `ssh_public_key` | Always required | Contents of `<key>.pub` |
-| `gpu.types` | User doesn't specify | `["T4"]` (cheapest). Valid: `T4`, `V100`, `A100` |
+| `gpu.types` | User doesn't specify | Use cheapest available from `/availability` |
+| `gpu.provider` | User prefers a provider | Provider name string (e.g. `"verda"`). Optional hint |
+| `gpu.location` | User prefers a location | Location string (e.g. `"FIN-01"`). Optional hint |
 | `environment_vars` | User needs env config | `{"KEY": "value", ...}` |
 | `billing.account_type` | Org billing | `"org"` + `account_id` |
 
@@ -361,8 +424,10 @@ Tokens last 1 hour. When printing post-session commands, mention:
 - The same SSH key authenticates with the API and provides session SSH access
 - Billing runs from provisioning to termination — remind users to terminate
   idle sessions
-- Available GPUs: `T4` (cheapest), `V100`, `A100`. Only suggest these three —
-  no other GPU types are enabled on the softlaunch platform
+- Available GPUs vary by provider — always check `/availability` before
+  suggesting GPU types. Multiple providers may offer different models at
+  different locations and prices. When the user doesn't specify, default
+  to the cheapest available option
 - When generating scripts for the user, include error handling for common
   failure modes (402 insufficient balance, 429 quota exceeded)
 - **Exploration vs. automation**: Default to `mirc` helper commands for
