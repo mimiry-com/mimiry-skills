@@ -122,8 +122,8 @@ and at what locations (e.g. `"verda"` at `"FIN-01"`). Use this as a
 pre-flight check before creating sessions, and to discover valid
 `provider` and `location` values for session creation hints.
 
-Optional query params: `gpu_family=H100,T4`, `min_vram_gb=40`,
-`location=FIN-01`, `available_only=false`, `detail=full`.
+Optional query params: `provider=verda`, `gpu_family=H100,T4`,
+`min_vram_gb=40`, `location=FIN-01`, `available_only=false`, `detail=full`.
 
 **Response structure** (abbreviated):
 ```json
@@ -241,7 +241,6 @@ told you (they may have answered several in their initial request):
 Optional (only ask if relevant to what the user described):
 - Environment variables
 - Auto-terminate behavior (default: `true` if command, `false` if interactive)
-- Billing account (only for org billing)
 
 Once you have enough information, authenticate, create the session, poll
 until running, and print management commands per "After Session Creation".
@@ -289,18 +288,17 @@ them — they are optional hints.
 | `gpu.provider` | User prefers a provider | Provider name string (e.g. `"verda"`). Optional hint |
 | `gpu.location` | User prefers a location | Location string (e.g. `"FIN-01"`). Optional hint |
 | `environment_vars` | User needs env config | `{"KEY": "value", ...}` |
-| `billing.account_type` | Org billing | `"org"` + `account_id` |
 
 ## Session Lifecycle
 
 Two dimensions:
 - **`state`** (durable milestone): `submitted → provisioned → started → completed/failed/stopped → terminated`
-- **`status`** (transient): `provisioning`, `pulling_image`, `starting_container`, `running`, `stopping_container`, `terminating`
+- **`status`** (transient): `provisioning`, `setting_up`, `pulling_image`, `starting_container`, `running`, `stopping_container`, `terminating`
 
 ```
-POST /sessions → state:submitted → state:provisioned                            → state:started → state:completed
-                 status:provisioning  status:pulling_image  status:starting_container  status:running      ↓
-                                                                                                     state:terminated
+POST /sessions → state:submitted → state:provisioned                                                              → state:started → state:completed
+                 status:provisioning  status:setting_up  status:pulling_image  status:starting_container  status:running      ↓
+                                                                                                                         state:terminated
                                               DELETE /sessions/{id}
                                                      ↓
                                               state:stopped → state:terminated
@@ -366,6 +364,17 @@ For convenience, suggest:
 ```bash
 alias mirc='SKILL_DIR/scripts/mirc.sh'
 ```
+
+### Alternative: Create via mirc CLI
+
+Sessions can also be created directly from the command line using `mirc create`:
+```bash
+mirc create --name training --image nvcr.io/nvidia/pytorch:24.01-py3 --gpu T4 --key ~/.ssh/mimiry
+mirc create --name job1 --image myimage:latest --gpu A100 --command "python train.py" --provider verda
+```
+
+This is the CLI equivalent of the agent's `POST /sessions` curl approach.
+Use `mirc create --help` for all available flags.
 
 ### Alternative: Raw API Commands
 
