@@ -33,12 +33,13 @@ executing commands.
 
 ---
 
-This skill covers two concerns:
+This skill covers three concerns:
 
-1. **API operations** (always available) — auth, list sessions, get status,
-   logs, terminate, check balance/quota
+1. **API operations** (always available) — auth, list sessions/volumes, get
+   status, logs, terminate, check balance/quota
 2. **Job building** (when creating something new) — choose an image strategy,
    pick an implementation language, generate the job script, and launch it
+3. **Volumes** — provision and manage persistent block storage for sessions
 
 ---
 
@@ -174,12 +175,23 @@ bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MI
 bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/sessions" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
 ```
 
+Optional filter query params (all comma-separated where lists apply):
+- `state=started,provisioned` — durable state inclusion
+- `state_not=terminated,completed` — durable state exclusion
+- `operation=starting,stopping` — primary operation inclusion (matches all
+  `<primary>__*` compounds, e.g. `operation=starting` matches
+  `starting__pulling_image`)
+- `operation_not=...` — primary operation exclusion
+- `updated_after=2026-05-01T00:00:00Z` — RFC3339, gates on durable state
+  changes only (sub-operation flips do NOT bump `updated_at`)
+- `updated_before=2026-05-03T00:00:00Z`
+
 **Get session details:**
 ```bash
 bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/sessions/$SESSION_ID" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
 ```
 
-**Get logs** (session must be `running`):
+**Get logs** (session must have `state=started`):
 ```bash
 bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/sessions/$SESSION_ID/logs?tail=50" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq -r .logs'
 ```
@@ -292,13 +304,24 @@ them — they are optional hints.
 ## Session Lifecycle
 
 Two dimensions:
-- **`state`** (durable milestone): `submitted → provisioned → started → completed/failed/stopped → terminated`
-- **`status`** (transient): `provisioning`, `setting_up`, `pulling_image`, `starting_container`, `running`, `stopping_container`, `terminating`
+- **`state`** (durable milestone — nouns / past-tense):
+  `submitted → provisioned → started → completed/failed/stopped/provision_failed → terminated`
+- **`operation`** (current activity — present-continuous, may be empty when
+  resting). Format is bare `<primary>` or compound `<primary>__<sub_step>`:
+  - `provisioning` — during `state=submitted`
+  - `starting__setting_up`, `starting__pulling_image`, `starting__starting_container` — during `state=provisioned`, transitioning to `started`
+  - `""` (empty) — at `state=started`, container is up and running (resting)
+  - `stopping__stopping_container` — transitioning from `started` to `stopped`
+  - `terminating` — transitioning toward `terminated`
+
+> **Filters accept primaries only.** `?operation=starting` matches all three
+> `starting__*` compounds. The compound value is what the response field
+> contains; the primary is what the filter accepts.
 
 ```
-POST /sessions → state:submitted → state:provisioned                                                              → state:started → state:completed
-                 status:provisioning  status:setting_up  status:pulling_image  status:starting_container  status:running      ↓
-                                                                                                                         state:terminated
+POST /sessions → state:submitted → state:provisioned                                                                                  → state:started → state:completed
+                 operation:provisioning  operation:starting__setting_up  operation:starting__pulling_image  operation:starting__starting_container  operation:""    ↓
+                                                                                                                                                            state:terminated
                                               DELETE /sessions/{id}
                                                      ↓
                                               state:stopped → state:terminated
@@ -306,10 +329,14 @@ POST /sessions → state:submitted → state:provisioned                        
 On error at any stage → state:failed or state:provision_failed
 ```
 
+`updated_at` is bumped only on durable state transitions. Sub-operation flips
+inside the same state (e.g. `starting__setting_up` → `starting__pulling_image`)
+do NOT move the session into `?updated_after=NOW-5s` results.
+
 Poll every 5 seconds until `started` (agent-internal, not user-facing).
 The entire loop MUST be in a single `bash -c` call:
 ```bash
-bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && while true; do RESP=$(curl -s "${MIMIRY_API}/sessions/$SESSION_ID" -H "Authorization: Bearer $MIMIRY_TOKEN"); STATE=$(echo "$RESP" | jq -r .state); STATUS=$(echo "$RESP" | jq -r .status); echo "State: $STATE | Status: $STATUS"; case "$STATE" in started) break ;; failed|provision_failed) echo "FAILED: $(echo $RESP | jq -r .error)"; break ;; completed|terminated|stopped) echo "Session ended unexpectedly"; break ;; esac; sleep 5; done'
+bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && while true; do RESP=$(curl -s "${MIMIRY_API}/sessions/$SESSION_ID" -H "Authorization: Bearer $MIMIRY_TOKEN"); STATE=$(echo "$RESP" | jq -r .state); OP=$(echo "$RESP" | jq -r ".operation // \"\""); echo "State: $STATE | Operation: $OP"; case "$STATE" in started) break ;; failed|provision_failed) echo "FAILED: $(echo $RESP | jq -r .error)"; break ;; completed|terminated|stopped) echo "Session ended unexpectedly"; break ;; esac; sleep 5; done'
 ```
 
 Once running, extract SSH details from `$RESP` (still in the same shell)
@@ -346,10 +373,10 @@ actual values from the session that was just created:
 
 ```
 # Manage your session (run in any terminal):
-mirc status <session_id> --key <key_path>
-mirc logs <session_id>
-mirc ssh <session_id>
-mirc terminate <session_id>
+mirc session status <session_id> --key <key_path>
+mirc session logs <session_id>
+mirc session ssh <session_id>
+mirc session terminate <session_id>
 ```
 
 The `--key` flag is only needed on the first command — the path is cached
@@ -367,14 +394,15 @@ alias mirc='SKILL_DIR/scripts/mirc.sh'
 
 ### Alternative: Create via mirc CLI
 
-Sessions can also be created directly from the command line using `mirc create`:
+Sessions can also be created directly from the command line using
+`mirc session create`:
 ```bash
-mirc create --name training --image nvcr.io/nvidia/pytorch:24.01-py3 --gpu T4 --key ~/.ssh/mimiry
-mirc create --name job1 --image myimage:latest --gpu A100 --command "python train.py" --provider verda
+mirc session create --name training --image nvcr.io/nvidia/pytorch:24.01-py3 --gpu T4 --key ~/.ssh/mimiry
+mirc session create --name job1 --image myimage:latest --gpu A100 --command "python train.py" --provider verda
 ```
 
 This is the CLI equivalent of the agent's `POST /sessions` curl approach.
-Use `mirc create --help` for all available flags.
+Run `mirc --help` for all top-level commands and subcommands.
 
 ### Alternative: Raw API Commands
 
@@ -410,6 +438,90 @@ Tokens last 1 hour. When printing post-session commands, mention:
 - The `mirc` helper auto-refreshes tokens (no action needed)
 - For raw API commands, re-run the `source` command to get a fresh token
 - If a command returns HTTP 401, the token has expired
+
+---
+
+## Part 3: Block Volumes
+
+Persistent block storage that survives session termination. A volume is
+created once, can be attached to a session at create time, and reused across
+sessions. Volumes belong to an organization (auto-picked from the user's
+membership when not specified).
+
+### Volume Lifecycle
+
+Two dimensions, mirroring sessions:
+- **`state`** (durable): `submitted → provisioned → deleted`, with `failed`
+  as the terminal error state.
+- **`operation`** (current activity, may be empty when resting):
+  - `provisioning` — during `state=submitted`
+  - `""` — at `state=provisioned`, ready to attach (resting)
+  - `resizing` — during in-place extension (state stays `provisioned`)
+  - `deleting__detaching_volume`, `deleting__deleting_volume` — transitioning
+    toward `state=deleted`
+
+> **Filters accept primaries only:** `?operation=deleting` matches both
+> `deleting__detaching_volume` and `deleting__deleting_volume`.
+
+`attached_to` is a **property**, not a state. A volume in `state=provisioned`
+with `attached_to="<session-id>"` is in use by that session; with
+`attached_to=""` it's free to attach.
+
+### Volume Operations
+
+**Create a volume:**
+```bash
+mirc volume create --name data1 --size-gb 100
+mirc volume create --name big-cache --size-gb 500 --provider verda --location FIN-01
+```
+
+Returns 202 with `{state: "submitted", operation: "provisioning"}` initially.
+Within seconds it transitions to `{state: "provisioned", operation: ""}`.
+
+Raw API equivalent:
+```bash
+bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && curl -s -X POST "${MIMIRY_API}/volumes" -H "Authorization: Bearer $MIMIRY_TOKEN" -H "Content-Type: application/json" -d '"'"'{"name":"data1","size_gb":100}'"'"' | jq .'
+```
+
+**List volumes** (same filter shape as sessions):
+```bash
+mirc volume list
+mirc volume list --state provisioned
+mirc volume list --state-not deleted --operation-not deleting
+```
+
+**Get details:**
+```bash
+mirc volume status <volume_id>
+```
+Note: deleted volumes are still returned by `GET /volumes/{id}` with
+`state=deleted` (cache is preserved). They are excluded from the default
+`GET /volumes` list — use `--state deleted` to include them.
+
+**Extend (resize) a volume** — must be larger than current size:
+```bash
+mirc volume extend <volume_id> --size-gb 200
+```
+Operation flips to `resizing` and back to `""` on completion. State stays
+`provisioned` (resize is in-place; no durable state transition, so
+`updated_at` does not bump).
+
+**Delete a volume** — the volume must not be attached to a running session:
+```bash
+mirc volume delete <volume_id>
+```
+Operation walks `deleting__detaching_volume → deleting__deleting_volume`
+before settling in `state=deleted, operation=""`.
+
+### Attaching a Volume to a Session
+
+Volume attachment happens at session-create time via the `volumes` field on
+`POST /sessions`. Once a session terminates, the volume is automatically
+detached and remains in `state=provisioned` ready for the next session.
+
+A volume can only be attached to **one running session at a time**. If the
+user wants to attach to a new session, the previous session must already be
+terminated (or use a different volume).
 
 ---
 
