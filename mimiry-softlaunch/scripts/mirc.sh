@@ -48,6 +48,7 @@ Usage: mirc <namespace> <command> [options]
 
 Top-level:
   auth                       Authenticate and print token info
+  install                    Symlink mirc into a user-space PATH directory
   session <subcommand>       Compute session operations
   volume  <subcommand>       Block volume operations
 
@@ -55,13 +56,17 @@ Global options:
   --key <path>    Path to SSH key (required on first use, remembered after)
   --help          Show this help message
 
+install options:
+  --prefix DIR    PATH directory to put the symlink in (default: ~/.local/bin)
+  --force         Overwrite an existing symlink/file
+
 Session subcommands:
   session create [opts]              Create a new compute session
   session list   [filter opts]       List sessions
   session status <id>                Show session status and details
   session logs   <id> [-n N]         Get session logs (default 50 lines)
   session ssh    <id>                SSH into a running session
-  session terminate <id>             Terminate a session
+  session terminate <id> [--wait]    Terminate a session
   session availability [opts]        Check GPU availability
   session balance                    Show current credit balance
 
@@ -70,7 +75,7 @@ Volume subcommands:
   volume list   [filter opts]        List volumes
   volume status <id>                 Show volume details
   volume extend <id> --size-gb N     Extend (resize) a volume
-  volume delete <id>                 Delete a volume
+  volume delete <id> [--wait]        Delete a volume
 
 session create options:
   --name NAME             Session name (required, 1-64 chars)
@@ -81,9 +86,11 @@ session create options:
   --location LOC          Location hint (e.g. FIN-01)
   --gpu-count N           Number of GPUs (default 1)
   --env KEY=VALUE         Environment variable (repeatable)
+  --volume NAME:PATH      Mount a block volume at PATH (repeatable)
   --auto-terminate MODE   on_complete | on_success | never
   --no-ssh                Disable SSH access
   --max-duration SECS     Max session duration in seconds
+  --wait                  Block until state=started and SSH is ready
 
 session list / volume list filter options:
   --state CSV             Inclusion list, e.g. "started,provisioned"
@@ -98,6 +105,7 @@ volume create options:
   --size-gb N             Size in GB (required)
   --provider PROV         Provider hint (e.g. verda)
   --location LOC          Location hint (e.g. FIN-01)
+  --wait                  Block until state=provisioned
 
 volume extend options:
   --size-gb N             New size in GB (must be larger than current)
@@ -111,6 +119,9 @@ session availability options:
   --include-all           Include unavailable GPUs
   --include-cpu           Include CPU-only offerings (filtered out by default)
   --detail full           Show full details
+  --cheapest              Print just the single cheapest matching offering
+                          (one human-readable line, or JSON with --json)
+  --json                  Machine-readable output (only with --cheapest)
 
 Session state values:
   submitted, provisioned, started, completed, failed,
@@ -126,6 +137,8 @@ Volume operation values (primary, for filters):
   provisioning, resizing, deleting
 
 Examples:
+  mirc install                              # symlink ~/.local/bin/mirc
+  mirc install --prefix ~/bin --force
   mirc auth --key ~/.ssh/mimiry
   mirc session create --name training --image nvcr.io/nvidia/pytorch:24.01-py3 --gpu T4
   mirc session list --state started
@@ -133,13 +146,26 @@ Examples:
   mirc session list --operation starting
   mirc session status abc123
   mirc session ssh abc123
-  mirc session terminate abc123
+  mirc session terminate abc123 --wait
   mirc session availability --family H100 --provider verda
+  mirc session availability --cheapest --provider verda --json
   mirc session balance
-  mirc volume create --name data1 --size-gb 100
+  mirc volume create --name data1 --size-gb 100 --wait
   mirc volume list --state provisioned
   mirc volume extend vol-abc --size-gb 200
-  mirc volume delete vol-abc
+  mirc volume delete vol-abc --wait
+
+Demo: cheapest GPU + persistent volume + interactive session
+  pick=$(mirc session availability --cheapest --provider verda --json)
+  gpu=$(echo "$pick"  | jq -r .gpu)
+  loc=$(echo "$pick"  | jq -r .location)
+  mirc volume create --name demo-vol --size-gb 10 --location "$loc" --wait
+  mirc session create \
+      --name demo --image docker.io/nvidia/cuda:12.2.0-base-ubuntu22.04 \
+      --gpu "$gpu" --provider verda --location "$loc" \
+      --volume demo-vol:/data --auto-terminate never \
+      --command 'nvidia-smi | tee /data/nvidia-smi-log; sleep infinity' \
+      --wait
 EOF
     exit 0
 }
@@ -254,12 +280,97 @@ cmd_auth() {
     echo "Token cached at $TOKEN_FILE (valid ~55 min)"
 }
 
+# ── install ──────────────────────────────────────────────────────────
+
+# Place a `mirc` symlink in a user-space PATH directory so the script can be
+# invoked by name. The symlink points at the canonical install location
+# ($HOME/.claude/skills/mimiry-softlaunch/scripts/mirc.sh). If that file
+# doesn't exist yet, the running script copies itself there first — so
+# `mirc install` works straight out of a fresh repo checkout.
+cmd_install() {
+    local prefix="$HOME/.local/bin"
+    local force=false
+    local canonical="$HOME/.claude/skills/mimiry-softlaunch/scripts/mirc.sh"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --prefix) prefix="${2:?'--prefix' requires a path}"; shift 2 ;;
+            --force)  force=true; shift ;;
+            *)        die "unknown option for install: $1" ;;
+        esac
+    done
+
+    local link="$prefix/mirc"
+    local self
+    self=$(realpath "${BASH_SOURCE[0]}")
+
+    # Make sure the canonical install location holds a copy of mirc. If it's
+    # missing, copy ourselves there. If it exists but differs from the running
+    # script, leave it alone unless --force is given (avoids surprise overwrite
+    # of a user-edited canonical copy).
+    mkdir -p "$(dirname "$canonical")"
+    if [ ! -f "$canonical" ]; then
+        cp "$self" "$canonical"
+        chmod +x "$canonical"
+        echo "Copied $self → $canonical" >&2
+    elif ! cmp -s "$canonical" "$self"; then
+        if [ "$force" = true ]; then
+            cp "$self" "$canonical"
+            chmod +x "$canonical"
+            echo "Overwrote $canonical with $self (--force)" >&2
+        else
+            echo "note: $canonical exists and differs in content from $self." >&2
+            echo "      keeping the existing copy. Re-run with --force to overwrite." >&2
+        fi
+    fi
+
+    mkdir -p "$prefix"
+
+    # Decide what to do with whatever currently lives at $link.
+    if [ -L "$link" ]; then
+        local current
+        current=$(readlink "$link")
+        if [ "$current" = "$canonical" ]; then
+            echo "Already installed: $link → $canonical" >&2
+        elif [ "$force" = true ]; then
+            rm -f "$link"
+            ln -s "$canonical" "$link"
+            echo "Replaced symlink: $link → $canonical (was → $current)" >&2
+        else
+            die "$link is a symlink to $current. Re-run with --force to replace."
+        fi
+    elif [ -e "$link" ]; then
+        if [ "$force" = true ]; then
+            rm -f "$link"
+            ln -s "$canonical" "$link"
+            echo "Replaced regular file: $link → $canonical" >&2
+        else
+            die "$link exists and is not a symlink. Re-run with --force to replace."
+        fi
+    else
+        ln -s "$canonical" "$link"
+        echo "Installed: $link → $canonical" >&2
+    fi
+
+    # PATH check — the symlink is useless if the prefix isn't on PATH.
+    case ":$PATH:" in
+        *":$prefix:"*) ;;
+        *)
+            echo "" >&2
+            echo "warn: $prefix is not on PATH. Add to your shell rc:" >&2
+            echo "  export PATH=\"$prefix:\$PATH\"" >&2
+            ;;
+    esac
+}
+
 # ── session subcommands ──────────────────────────────────────────────
 
 cmd_session_create() {
     local name="" image="" gpu="" command="" provider="" location=""
     local gpu_count=1 auto_terminate="" no_ssh=false max_duration=""
+    local wait_flag=false
     local -a env_vars=()
+    local -a volumes=()
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -271,9 +382,11 @@ cmd_session_create() {
             --location)       location="${2:?'--location' requires a value}"; shift 2 ;;
             --gpu-count)      gpu_count="${2:?'--gpu-count' requires a value}"; shift 2 ;;
             --env)            env_vars+=("${2:?'--env' requires KEY=VALUE}"); shift 2 ;;
+            --volume)         volumes+=("${2:?'--volume' requires NAME:MOUNT_PATH}"); shift 2 ;;
             --auto-terminate) auto_terminate="${2:?'--auto-terminate requires a mode'}"; shift 2 ;;
             --no-ssh)         no_ssh=true; shift ;;
             --max-duration)   max_duration="${2:?'--max-duration' requires a value}"; shift 2 ;;
+            --wait)           wait_flag=true; shift ;;
             *)                die "unknown option for session create: $1" ;;
         esac
     done
@@ -333,8 +446,20 @@ cmd_session_create() {
         done
         json=$(echo "$json" | jq --argjson ev "$env_json" '. + {environment_vars: $ev}')
     fi
+    if [ ${#volumes[@]} -gt 0 ]; then
+        local vols_json="[]"
+        for spec in "${volumes[@]}"; do
+            local vname="${spec%%:*}"
+            local vpath="${spec#*:}"
+            [ -n "$vname" ] && [ "$vname" != "$spec" ] || die "--volume must be NAME:MOUNT_PATH (got: $spec)"
+            [ -n "$vpath" ] || die "--volume must be NAME:MOUNT_PATH (got: $spec)"
+            vols_json=$(echo "$vols_json" | jq --arg n "$vname" --arg p "$vpath" \
+                '. + [{volume_name: $n, mount_path: $p}]')
+        done
+        json=$(echo "$json" | jq --argjson v "$vols_json" '. + {volumes: $v}')
+    fi
 
-    local resp http_code
+    local resp http_code session_id
     resp=$(curl -s -w '\n%{http_code}' -X POST "$API/sessions" \
         -H "Authorization: Bearer $MIMIRY_TOKEN" \
         -H "Content-Type: application/json" \
@@ -344,16 +469,8 @@ cmd_session_create() {
 
     case "$http_code" in
         202)
-            local session_id
             session_id=$(echo "$resp" | jq -r '.id')
             echo "Session created: $session_id" >&2
-            echo "" >&2
-            echo "Next steps:" >&2
-            echo "  mirc session status $session_id     # check progress" >&2
-            echo "  mirc session ssh $session_id         # connect when running" >&2
-            echo "  mirc session logs $session_id        # view container logs" >&2
-            echo "  mirc session terminate $session_id   # stop the session" >&2
-            echo "$resp" | jq .
             ;;
         402)
             echo "error: insufficient balance" >&2
@@ -365,6 +482,59 @@ cmd_session_create() {
             exit 1
             ;;
     esac
+
+    if [ "$wait_flag" = false ]; then
+        echo "" >&2
+        echo "Next steps:" >&2
+        echo "  mirc session status $session_id     # check progress" >&2
+        echo "  mirc session ssh $session_id         # connect when running" >&2
+        echo "  mirc session logs $session_id        # view container logs" >&2
+        echo "  mirc session terminate $session_id   # stop the session" >&2
+        echo "$resp" | jq .
+        return
+    fi
+
+    # --wait: poll until state=started AND ssh.host populated, or fail on
+    # terminal/error states. Refresh the token periodically since boot can
+    # exceed the JWT lifetime.
+    echo "Waiting for session to reach state=started + SSH ready ..." >&2
+    local start_ts now elapsed state operation ssh_host
+    start_ts=$(date +%s)
+    local last_refresh=$start_ts
+    local timeout_secs=900
+    while :; do
+        now=$(date +%s)
+        elapsed=$(( now - start_ts ))
+        if (( now - last_refresh > 1800 )); then
+            ensure_token
+            last_refresh=$now
+        fi
+        local detail
+        detail=$(api_get "/sessions/$session_id") || detail=""
+        state=$(echo "$detail" | jq -r '.state // "unknown"')
+        operation=$(echo "$detail" | jq -r '.operation // ""')
+        ssh_host=$(echo "$detail" | jq -r '.ssh.host // empty')
+        case "$state" in
+            failed|provision_failed|terminated|stopped)
+                echo "" >&2
+                echo "$detail" | jq . >&2
+                die "session reached terminal state=$state before becoming ready"
+                ;;
+            started)
+                if [ -n "$ssh_host" ]; then
+                    printf "\rstate=%-12s operation=%-30s (%ds) — ready\n" "$state" "$operation" "$elapsed" >&2
+                    echo "$detail" | jq .
+                    return
+                fi
+                ;;
+        esac
+        if (( elapsed >= timeout_secs )); then
+            echo "" >&2
+            die "timed out after ${timeout_secs}s waiting for session to start (last state=$state, operation=$operation)"
+        fi
+        printf "\rstate=%-12s operation=%-30s (%ds)" "$state" "$operation" "$elapsed" >&2
+        sleep 5
+    done
 }
 
 cmd_session_list() {
@@ -430,15 +600,57 @@ cmd_session_ssh() {
 }
 
 cmd_session_terminate() {
-    [ -n "${1:-}" ] || die "usage: mirc session terminate <session_id>"
+    local id="" wait_flag=false
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --wait) wait_flag=true; shift ;;
+            -*)     die "unknown option for session terminate: $1" ;;
+            *)      id="$1"; shift ;;
+        esac
+    done
+    [ -n "$id" ] || die "usage: mirc session terminate <session_id> [--wait]"
     ensure_token
-    api_delete "/sessions/$1" | jq .
-    echo "Terminate request sent for $1" >&2
+    api_delete "/sessions/$id" | jq . 2>/dev/null || true
+    echo "Terminate request sent for $id" >&2
+
+    [ "$wait_flag" = true ] || return
+
+    echo "Waiting for session to reach terminal state ..." >&2
+    local start_ts now elapsed state operation detail timeout_secs=300
+    start_ts=$(date +%s)
+    while :; do
+        now=$(date +%s)
+        elapsed=$(( now - start_ts ))
+        local resp http_code
+        resp=$(curl -s -w '\n%{http_code}' "$API/sessions/$id" \
+            -H "Authorization: Bearer $MIMIRY_TOKEN")
+        http_code=$(echo "$resp" | tail -1)
+        detail=$(echo "$resp" | sed '$d')
+        if [ "$http_code" = "404" ]; then
+            printf "\rsession removed (%ds)\n" "$elapsed" >&2
+            return
+        fi
+        state=$(echo "$detail"     | jq -r '.state // "unknown"')
+        operation=$(echo "$detail" | jq -r '.operation // ""')
+        case "$state" in
+            terminated|completed|failed|stopped|provision_failed)
+                printf "\rstate=%-12s operation=%-30s (%ds)\n" "$state" "$operation" "$elapsed" >&2
+                return
+                ;;
+        esac
+        if (( elapsed >= timeout_secs )); then
+            echo "" >&2
+            die "timed out after ${timeout_secs}s (last state=$state, operation=$operation)"
+        fi
+        printf "\rstate=%-12s operation=%-30s (%ds)" "$state" "$operation" "$elapsed" >&2
+        sleep 3
+    done
 }
 
 cmd_session_availability() {
     local provider="" location="" family="" form_factor="" min_vram=""
     local include_all=false include_cpu=false detail=""
+    local cheapest=false as_json=false
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -450,6 +662,8 @@ cmd_session_availability() {
             --include-all) include_all=true; shift ;;
             --include-cpu) include_cpu=true; shift ;;
             --detail)      detail="${2:?'--detail' requires a value}"; shift 2 ;;
+            --cheapest)    cheapest=true; shift ;;
+            --json)        as_json=true; shift ;;
             *)             die "unknown option for session availability: $1" ;;
         esac
     done
@@ -476,7 +690,38 @@ cmd_session_availability() {
             .gpu_models |= [.[] | select((.vram_gb // 0) > 0)]')
     fi
 
-    echo "$result" | jq .
+    if [ "$cheapest" = false ]; then
+        echo "$result" | jq .
+        return
+    fi
+
+    # --cheapest: flatten to one row per (gpu, provider, location), filter by
+    # --provider if given, sort by hourly_rate, return the top row.
+    local pick
+    pick=$(echo "$result" | jq --arg p "$provider" '
+        [ .gpu_models[]
+          | select(.available == true and (.vram_gb // 0) > 0)
+          | .name as $gpu | .display_name as $disp | .vram_gb as $vram
+          | .currency as $cur
+          | .providers[]
+          | select(($p == "") or (.provider == $p))
+          | .provider as $prov | .hourly_rate as $rate
+          | .locations[]
+          | { gpu: $gpu, display_name: $disp, vram_gb: $vram,
+              provider: $prov, hourly_rate: $rate, currency: $cur, location: . } ]
+        | sort_by(.hourly_rate)
+        | .[0] // empty')
+
+    if [ -z "$pick" ] || [ "$pick" = "null" ]; then
+        die "no available GPU offerings match the filter"
+    fi
+
+    if [ "$as_json" = true ]; then
+        echo "$pick" | jq -c .
+    else
+        echo "$pick" | jq -r '
+            "\(.display_name) (\(.gpu))  provider=\(.provider)  location=\(.location)  \(.currency) \(.hourly_rate)/hr"'
+    fi
 }
 
 cmd_session_balance() {
@@ -505,13 +750,14 @@ cmd_session() {
 # ── volume subcommands ───────────────────────────────────────────────
 
 cmd_volume_create() {
-    local name="" size_gb="" provider="" location=""
+    local name="" size_gb="" provider="" location="" wait_flag=false
     while [ $# -gt 0 ]; do
         case "$1" in
             --name)     name="${2:?'--name' requires a value}"; shift 2 ;;
             --size-gb)  size_gb="${2:?'--size-gb' requires a value}"; shift 2 ;;
             --provider) provider="${2:?'--provider' requires a value}"; shift 2 ;;
             --location) location="${2:?'--location' requires a value}"; shift 2 ;;
+            --wait)     wait_flag=true; shift ;;
             *) die "unknown option for volume create: $1" ;;
         esac
     done
@@ -527,7 +773,7 @@ cmd_volume_create() {
     [ -n "$provider" ] && json=$(echo "$json" | jq --arg p "$provider" '. + {provider: $p}')
     [ -n "$location" ] && json=$(echo "$json" | jq --arg l "$location" '. + {location: $l}')
 
-    local resp http_code
+    local resp http_code vol_id
     resp=$(curl -s -w '\n%{http_code}' -X POST "$API/volumes" \
         -H "Authorization: Bearer $MIMIRY_TOKEN" \
         -H "Content-Type: application/json" \
@@ -537,17 +783,9 @@ cmd_volume_create() {
 
     case "$http_code" in
         200|201|202)
-            local vol_id
             vol_id=$(echo "$resp" | jq -r '.id // empty')
-            [ -n "$vol_id" ] && {
-                echo "Volume created: $vol_id" >&2
-                echo "" >&2
-                echo "Next steps:" >&2
-                echo "  mirc volume status $vol_id     # check progress" >&2
-                echo "  mirc volume extend $vol_id --size-gb N  # resize" >&2
-                echo "  mirc volume delete $vol_id     # delete" >&2
-            }
-            echo "$resp" | jq .
+            [ -n "$vol_id" ] || die "create succeeded (HTTP $http_code) but no id in response"
+            echo "Volume created: $vol_id" >&2
             ;;
         402)
             echo "error: insufficient balance" >&2
@@ -559,6 +797,46 @@ cmd_volume_create() {
             exit 1
             ;;
     esac
+
+    if [ "$wait_flag" = false ]; then
+        echo "" >&2
+        echo "Next steps:" >&2
+        echo "  mirc volume status $vol_id     # check progress" >&2
+        echo "  mirc volume extend $vol_id --size-gb N  # resize" >&2
+        echo "  mirc volume delete $vol_id     # delete" >&2
+        echo "$resp" | jq .
+        return
+    fi
+
+    echo "Waiting for volume to reach state=provisioned ..." >&2
+    local start_ts now elapsed state operation timeout_secs=300
+    start_ts=$(date +%s)
+    while :; do
+        now=$(date +%s)
+        elapsed=$(( now - start_ts ))
+        local detail
+        detail=$(api_get "/volumes/$vol_id") || detail=""
+        state=$(echo "$detail"     | jq -r '.state // "unknown"')
+        operation=$(echo "$detail" | jq -r '.operation // ""')
+        case "$state" in
+            provisioned)
+                printf "\rstate=%-12s operation=%-20s (%ds) — ready\n" "$state" "$operation" "$elapsed" >&2
+                echo "$detail" | jq .
+                return
+                ;;
+            failed)
+                echo "" >&2
+                echo "$detail" | jq . >&2
+                die "volume reached state=failed"
+                ;;
+        esac
+        if (( elapsed >= timeout_secs )); then
+            echo "" >&2
+            die "timed out after ${timeout_secs}s waiting for volume to provision (last state=$state, operation=$operation)"
+        fi
+        printf "\rstate=%-12s operation=%-20s (%ds)" "$state" "$operation" "$elapsed" >&2
+        sleep 3
+    done
 }
 
 cmd_volume_list() {
@@ -606,10 +884,49 @@ cmd_volume_extend() {
 }
 
 cmd_volume_delete() {
-    [ -n "${1:-}" ] || die "usage: mirc volume delete <volume_id>"
+    local id="" wait_flag=false
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --wait) wait_flag=true; shift ;;
+            -*)     die "unknown option for volume delete: $1" ;;
+            *)      id="$1"; shift ;;
+        esac
+    done
+    [ -n "$id" ] || die "usage: mirc volume delete <volume_id> [--wait]"
     ensure_token
-    api_delete "/volumes/$1" | jq . 2>/dev/null || true
-    echo "Delete request sent for $1" >&2
+    api_delete "/volumes/$id" | jq . 2>/dev/null || true
+    echo "Delete request sent for $id" >&2
+
+    [ "$wait_flag" = true ] || return
+
+    echo "Waiting for volume to reach state=deleted ..." >&2
+    local start_ts now elapsed state operation detail timeout_secs=180
+    start_ts=$(date +%s)
+    while :; do
+        now=$(date +%s)
+        elapsed=$(( now - start_ts ))
+        local resp http_code
+        resp=$(curl -s -w '\n%{http_code}' "$API/volumes/$id" \
+            -H "Authorization: Bearer $MIMIRY_TOKEN")
+        http_code=$(echo "$resp" | tail -1)
+        detail=$(echo "$resp" | sed '$d')
+        if [ "$http_code" = "404" ]; then
+            printf "\rvolume removed (%ds)\n" "$elapsed" >&2
+            return
+        fi
+        state=$(echo "$detail"     | jq -r '.state // "unknown"')
+        operation=$(echo "$detail" | jq -r '.operation // ""')
+        if [ "$state" = "deleted" ]; then
+            printf "\rstate=%-12s operation=%-20s (%ds)\n" "$state" "$operation" "$elapsed" >&2
+            return
+        fi
+        if (( elapsed >= timeout_secs )); then
+            echo "" >&2
+            die "timed out after ${timeout_secs}s (last state=$state, operation=$operation)"
+        fi
+        printf "\rstate=%-12s operation=%-20s (%ds)" "$state" "$operation" "$elapsed" >&2
+        sleep 3
+    done
 }
 
 # Dispatch a volume subcommand.
@@ -653,6 +970,7 @@ done
 
 case "$CMD" in
     auth)    cmd_auth "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
+    install) cmd_install "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
     session) cmd_session "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
     volume)  cmd_volume "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
     help)    usage ;;
