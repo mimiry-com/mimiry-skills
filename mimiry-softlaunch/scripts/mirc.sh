@@ -499,6 +499,7 @@ cmd_session_create() {
     # exceed the JWT lifetime.
     echo "Waiting for session to reach state=started + SSH ready ..." >&2
     local start_ts now elapsed state operation ssh_host
+    local first_404_elapsed=-1 ever_seen_200=false
     start_ts=$(date +%s)
     local last_refresh=$start_ts
     local timeout_secs=900
@@ -509,30 +510,60 @@ cmd_session_create() {
             ensure_token
             last_refresh=$now
         fi
-        local detail
-        detail=$(api_get "/sessions/$session_id") || detail=""
-        state=$(echo "$detail" | jq -r '.state // "unknown"')
-        operation=$(echo "$detail" | jq -r '.operation // ""')
-        ssh_host=$(echo "$detail" | jq -r '.ssh.host // empty')
-        case "$state" in
-            failed|provision_failed|terminated|stopped)
-                echo "" >&2
-                echo "$detail" | jq . >&2
-                die "session reached terminal state=$state before becoming ready"
+        local resp http_code detail
+        resp=$(curl -s -w '\n%{http_code}' "$API/sessions/$session_id" \
+            -H "Authorization: Bearer $MIMIRY_TOKEN") || resp=""
+        http_code=$(echo "$resp" | tail -1)
+        detail=$(echo "$resp" | sed '$d')
+        case "$http_code" in
+            200)
+                ever_seen_200=true
+                state=$(echo "$detail" | jq -r '.state // "unknown"')
+                operation=$(echo "$detail" | jq -r '.operation // ""')
+                ssh_host=$(echo "$detail" | jq -r '.ssh.host // empty')
+                case "$state" in
+                    failed|provision_failed|terminated|stopped)
+                        echo "" >&2
+                        echo "$detail" | jq . >&2
+                        die "session reached terminal state=$state before becoming ready"
+                        ;;
+                    started)
+                        if [ -n "$ssh_host" ]; then
+                            printf "\rstate=%-12s operation=%-30s (%ds) — ready\n" "$state" "$operation" "$elapsed" >&2
+                            echo "$detail" | jq .
+                            return
+                        fi
+                        ;;
+                esac
+                printf "\rstate=%-12s operation=%-30s (%ds)" "$state" "$operation" "$elapsed" >&2
                 ;;
-            started)
-                if [ -n "$ssh_host" ]; then
-                    printf "\rstate=%-12s operation=%-30s (%ds) — ready\n" "$state" "$operation" "$elapsed" >&2
-                    echo "$detail" | jq .
-                    return
+            401)
+                ensure_token
+                last_refresh=$now
+                printf "\rrefreshed token (%ds)" "$elapsed" >&2
+                ;;
+            404)
+                if [ "$ever_seen_200" = false ]; then
+                    if (( first_404_elapsed < 0 )); then first_404_elapsed=$elapsed; fi
+                    local nf_age=$(( elapsed - first_404_elapsed ))
+                    if (( nf_age >= 60 )); then
+                        echo "" >&2
+                        die "GET /sessions/$session_id has been HTTP 404 for ${nf_age}s — session create likely never reached the cache. Run: mirc session list"
+                    fi
+                    printf "\rwaiting (HTTP 404 — not yet in cache, %ds)" "$nf_age" >&2
+                else
+                    echo "" >&2
+                    die "GET /sessions/$session_id is now 404 after previously being visible"
                 fi
+                ;;
+            *)
+                printf "\rGET /sessions/%s → HTTP %s (%ds)" "$session_id" "$http_code" "$elapsed" >&2
                 ;;
         esac
         if (( elapsed >= timeout_secs )); then
             echo "" >&2
-            die "timed out after ${timeout_secs}s waiting for session to start (last state=$state, operation=$operation)"
+            die "timed out after ${timeout_secs}s waiting for session to start"
         fi
-        printf "\rstate=%-12s operation=%-30s (%ds)" "$state" "$operation" "$elapsed" >&2
         sleep 5
     done
 }
@@ -810,31 +841,61 @@ cmd_volume_create() {
 
     echo "Waiting for volume to reach state=provisioned ..." >&2
     local start_ts now elapsed state operation timeout_secs=300
+    local first_404_elapsed=-1 ever_seen_200=false
     start_ts=$(date +%s)
     while :; do
         now=$(date +%s)
         elapsed=$(( now - start_ts ))
-        local detail
-        detail=$(api_get "/volumes/$vol_id") || detail=""
-        state=$(echo "$detail"     | jq -r '.state // "unknown"')
-        operation=$(echo "$detail" | jq -r '.operation // ""')
-        case "$state" in
-            provisioned)
-                printf "\rstate=%-12s operation=%-20s (%ds) — ready\n" "$state" "$operation" "$elapsed" >&2
-                echo "$detail" | jq .
-                return
+        local resp http_code detail
+        resp=$(curl -s -w '\n%{http_code}' "$API/volumes/$vol_id" \
+            -H "Authorization: Bearer $MIMIRY_TOKEN") || resp=""
+        http_code=$(echo "$resp" | tail -1)
+        detail=$(echo "$resp" | sed '$d')
+        case "$http_code" in
+            200)
+                ever_seen_200=true
+                state=$(echo "$detail"     | jq -r '.state // "unknown"')
+                operation=$(echo "$detail" | jq -r '.operation // ""')
+                case "$state" in
+                    provisioned)
+                        printf "\rstate=%-12s operation=%-20s (%ds) — ready\n" "$state" "$operation" "$elapsed" >&2
+                        echo "$detail" | jq .
+                        return
+                        ;;
+                    failed)
+                        echo "" >&2
+                        echo "$detail" | jq . >&2
+                        die "volume reached state=failed"
+                        ;;
+                esac
+                printf "\rstate=%-12s operation=%-20s (%ds)" "$state" "$operation" "$elapsed" >&2
                 ;;
-            failed)
-                echo "" >&2
-                echo "$detail" | jq . >&2
-                die "volume reached state=failed"
+            401)
+                ensure_token
+                printf "\rrefreshed token (%ds)" "$elapsed" >&2
+                ;;
+            404)
+                if [ "$ever_seen_200" = false ]; then
+                    if (( first_404_elapsed < 0 )); then first_404_elapsed=$elapsed; fi
+                    local nf_age=$(( elapsed - first_404_elapsed ))
+                    if (( nf_age >= 60 )); then
+                        echo "" >&2
+                        die "GET /volumes/$vol_id has been HTTP 404 for ${nf_age}s — volume create likely never reached the cache. Run: mirc volume list"
+                    fi
+                    printf "\rwaiting (HTTP 404 — not yet in cache, %ds)" "$nf_age" >&2
+                else
+                    echo "" >&2
+                    die "GET /volumes/$vol_id is now 404 after previously being visible — volume disappeared"
+                fi
+                ;;
+            *)
+                printf "\rGET /volumes/%s → HTTP %s (%ds)" "$vol_id" "$http_code" "$elapsed" >&2
                 ;;
         esac
         if (( elapsed >= timeout_secs )); then
             echo "" >&2
-            die "timed out after ${timeout_secs}s waiting for volume to provision (last state=$state, operation=$operation)"
+            die "timed out after ${timeout_secs}s waiting for volume to provision"
         fi
-        printf "\rstate=%-12s operation=%-20s (%ds)" "$state" "$operation" "$elapsed" >&2
         sleep 3
     done
 }
