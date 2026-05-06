@@ -1,7 +1,7 @@
 # 1. Ignore ALL hidden files and directories by default
 .*
 
-!.gitignore
+!.gitignore
 
 # 2. Allow-list the specific AI/Agent essentials
 !.agents/
