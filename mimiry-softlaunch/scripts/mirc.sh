@@ -92,13 +92,15 @@ session create options:
   --max-duration SECS     Max session duration in seconds
   --wait                  Block until state=started and SSH is ready
 
-session list / volume list filter options:
+session list / volume list filter + pagination options:
   --state CSV             Inclusion list, e.g. "started,provisioned"
   --state-not CSV         Exclusion list
   --operation CSV         Primary operation inclusion (e.g. "starting,stopping")
   --operation-not CSV     Primary operation exclusion
   --updated-after RFC3339 e.g. 2026-05-03T10:00:00Z
   --updated-before RFC3339
+  --limit N               Page size, 1-100, default 50
+  --offset N              Skip the first N items in the (sorted) result
 
 volume create options:
   --name NAME             Volume name (required)
@@ -249,9 +251,13 @@ ensure_token() {
 api_get()    { curl -sf "$API$1" -H "Authorization: Bearer $MIMIRY_TOKEN"; }
 api_delete() { curl -sf -X DELETE "$API$1" -H "Authorization: Bearer $MIMIRY_TOKEN"; }
 
-# Build a query string from list filter flags. Sets QS variable.
+# Build a query string from list filter + pagination flags. Sets QS.
+# All `list` commands route through this so the flag set stays uniform —
+# see API-CONVENTIONS-LIST.md.
 parse_list_filters() {
-    local state="" state_not="" operation="" operation_not="" updated_after="" updated_before=""
+    local state="" state_not="" operation="" operation_not=""
+    local updated_after="" updated_before=""
+    local limit="" offset=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --state)           state="${2:?'--state' requires a value}"; shift 2 ;;
@@ -260,6 +266,8 @@ parse_list_filters() {
             --operation-not)   operation_not="${2:?'--operation-not' requires a value}"; shift 2 ;;
             --updated-after)   updated_after="${2:?'--updated-after' requires a value}"; shift 2 ;;
             --updated-before)  updated_before="${2:?'--updated-before' requires a value}"; shift 2 ;;
+            --limit)           limit="${2:?'--limit' requires a value}"; shift 2 ;;
+            --offset)          offset="${2:?'--offset' requires a value}"; shift 2 ;;
             *) die "unknown filter option: $1" ;;
         esac
     done
@@ -270,6 +278,8 @@ parse_list_filters() {
     [ -n "$operation_not" ]  && QS="${QS}&operation_not=$(urlencode "$operation_not")"
     [ -n "$updated_after" ]  && QS="${QS}&updated_after=$(urlencode "$updated_after")"
     [ -n "$updated_before" ] && QS="${QS}&updated_before=$(urlencode "$updated_before")"
+    [ -n "$limit" ]          && QS="${QS}&limit=$(urlencode "$limit")"
+    [ -n "$offset" ]          && QS="${QS}&offset=$(urlencode "$offset")"
     if [ -n "$QS" ]; then QS="?${QS:1}"; fi
 }
 
