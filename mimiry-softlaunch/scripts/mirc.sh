@@ -456,7 +456,7 @@ cmd_session_create() {
             vols_json=$(echo "$vols_json" | jq --arg n "$vname" --arg p "$vpath" \
                 '. + [{volume_name: $n, mount_path: $p}]')
         done
-        json=$(echo "$json" | jq --argjson v "$vols_json" '. + {volumes: $v}')
+        json=$(echo "$json" | jq --argjson v "$vols_json" '. + {volume_mounts: $v}')
     fi
 
     local resp http_code session_id
