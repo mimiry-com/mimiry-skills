@@ -213,6 +213,9 @@ Filter options:
   --operation-not CSV     Primary operation exclusion
   --updated-after RFC3339 e.g. 2026-05-03T10:00:00Z
   --updated-before RFC3339
+  --all                   Sugar for --state with every session state.
+                          Bypasses any future default-hide rules. A trailing
+                          --state / --state-not still wins.
 
 Pagination options:
   --limit N               Page size, 1-100, default 50
@@ -223,6 +226,7 @@ Examples:
   mirc session list --state started
   mirc session list --state-not terminated,completed --updated-after 2026-05-01T00:00:00Z
   mirc session list --operation starting
+  mirc session list --all
 EOF
     exit 0
 }
@@ -372,7 +376,7 @@ volume_list_help() {
 Usage: mirc volume list [filter opts]
 
 List volumes (paginated, sorted newest-first). Default hides deleted
-volumes — pass --state deleted to see history.
+volumes — pass --all (or --state with deleted in it) to see history.
 
 Filter options:
   --state CSV             Inclusion list, e.g. "provisioned,deleted"
@@ -381,14 +385,20 @@ Filter options:
   --operation-not CSV     Primary operation exclusion
   --updated-after RFC3339
   --updated-before RFC3339
+  --all                   Sugar for --state with every volume state — same
+                          as `--state submitted,provisioned,failed,deleted`.
+                          Short-circuits the default state_not=deleted filter.
+                          A trailing --state / --state-not still wins.
 
 Pagination options:
   --limit N               Page size, 1-100, default 50
   --offset N              Skip the first N items
 
 Examples:
-  mirc volume list                       # active volumes only
-  mirc volume list --state deleted       # history
+  mirc volume list                       # active volumes only (default hides deleted)
+  mirc volume list --all                 # active + history
+  mirc volume list --state deleted       # history only
+  mirc volume list --all --state-not deleted   # same as the default
   mirc volume list --state provisioned,deleted
 EOF
     exit 0
@@ -853,7 +863,18 @@ cmd_session_create() {
 
 cmd_session_list() {
     _has_help_flag "$@" && session_list_help
-    parse_list_filters "$@"
+    # --all is a CLI sugar: short-circuits any backend default state filter
+    # by passing every documented session state explicitly. A trailing
+    # --state / --state-not still wins (last-write-wins in parse_list_filters),
+    # so `--all --state-not terminated` reads as "everything except terminated".
+    local args=()
+    for a in "$@"; do
+        case "$a" in
+            --all) args+=(--state "submitted,provisioned,started,completed,failed,stopped,provision_failed,terminated") ;;
+            *)     args+=("$a") ;;
+        esac
+    done
+    parse_list_filters "${args[@]+"${args[@]}"}"
     ensure_token
     api_get "/sessions${QS}" | jq .
 }
@@ -1197,7 +1218,18 @@ cmd_volume_create() {
 
 cmd_volume_list() {
     _has_help_flag "$@" && volume_list_help
-    parse_list_filters "$@"
+    # --all is a CLI sugar: short-circuits the backend's default
+    # state_not=deleted filter by passing every documented volume state
+    # explicitly. A trailing --state / --state-not still wins, so
+    # `--all --state-not deleted` reads as "everything except deleted".
+    local args=()
+    for a in "$@"; do
+        case "$a" in
+            --all) args+=(--state "submitted,provisioned,failed,deleted") ;;
+            *)     args+=("$a") ;;
+        esac
+    done
+    parse_list_filters "${args[@]+"${args[@]}"}"
     ensure_token
     api_get "/volumes${QS}" | jq .
 }
