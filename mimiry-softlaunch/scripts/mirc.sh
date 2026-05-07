@@ -42,46 +42,144 @@ TOKEN_MAX_AGE=3300  # 55 minutes
 die()  { echo "error: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not found"; }
 
-usage() {
-    cat <<'EOF'
-Usage: mirc <namespace> <command> [options]
+# ── help system ──────────────────────────────────────────────────────
+# Help is hierarchical:
+#   mirc --help                          → top_help
+#   mirc <namespace> --help              → <namespace>_help (subcommands)
+#   mirc <namespace> <command> --help    → <namespace>_<command>_help
+# Each helper prints to stdout and exits 0. _has_help_flag is the gate
+# that callers test before parsing real arguments.
 
-Top-level:
-  auth                       Authenticate and print token info
-  install                    Symlink mirc into a user-space PATH directory
-  session <subcommand>       Compute session operations
-  volume  <subcommand>       Block volume operations
+_has_help_flag() {
+    for arg in "$@"; do
+        case "$arg" in --help|-h) return 0 ;; esac
+    done
+    return 1
+}
+
+top_help() {
+    cat <<'EOF'
+Usage: mirc <command> [args...]
+
+mirc — CLI for the Mimiry compute platform. Auth, manage GPU compute
+sessions and persistent block volumes, query GPU availability.
+
+Commands:
+  auth                   Authenticate and print token info
+  install                Symlink mirc into a user-space PATH directory
+  session <subcommand>   Compute session operations
+  volume  <subcommand>   Block volume operations
 
 Global options:
   --key <path>    Path to SSH key (required on first use, remembered after)
-  --help          Show this help message
+  --help, -h      Show this help message (works at every level)
 
-install options:
+Discover more:
+  mirc auth --help
+  mirc install --help
+  mirc session --help          # list session subcommands
+  mirc volume --help           # list volume subcommands
+  mirc session create --help   # detailed help for one command
+
+Quick examples:
+  mirc install                                       # symlink to ~/.local/bin/mirc
+  mirc auth --key ~/.ssh/mimiry
+  mirc session list --state started
+  mirc volume create --name data1 --size-gb 100 --wait
+  mirc session availability --cheapest --provider verda --json
+
+Demo — cheapest GPU + persistent volume + interactive session:
+  pick=$(mirc session availability --cheapest --provider verda --json)
+  gpu=$(echo "$pick" | jq -r .gpu)
+  loc=$(echo "$pick" | jq -r .location)
+  mirc volume create --name demo-vol --size-gb 100 --location "$loc" --wait
+  mirc session create \
+      --name demo --image docker.io/nvidia/cuda:12.2.0-base-ubuntu22.04 \
+      --gpu "$gpu" --provider verda --location "$loc" \
+      --volume demo-vol:/data --auto-terminate never \
+      --command 'nvidia-smi | tee /data/nvidia-smi-log; sleep infinity' \
+      --wait
+EOF
+    exit 0
+}
+
+auth_help() {
+    cat <<'EOF'
+Usage: mirc auth [--key <path>]
+
+Authenticate to the platform via SSH-key signature and cache the resulting
+JWT for ~55 minutes. The --key path is remembered for subsequent commands;
+you only need to pass it on first use or when changing keys.
+
+Options:
+  --key <path>    Path to your SSH private key (the public key must be
+                  registered with the platform).
+
+Example:
+  mirc auth --key ~/.ssh/mimiry
+EOF
+    exit 0
+}
+
+install_help() {
+    cat <<'EOF'
+Usage: mirc install [--prefix DIR] [--force]
+
+Symlinks mirc into a user-space PATH directory so you can invoke it by
+name from any shell. Idempotent — re-running with no flags is a no-op
+when the symlink already points at the canonical install location.
+
+Options:
   --prefix DIR    PATH directory to put the symlink in (default: ~/.local/bin)
-  --force         Overwrite an existing symlink/file
+  --force         Overwrite an existing symlink or regular file at <prefix>/mirc
 
-Session subcommands:
-  session create [opts]              Create a new compute session
-  session list   [filter opts]       List sessions
-  session status <id>                Show session status and details
-  session logs   <id> [-n N]         Get session logs (default 50 lines)
-  session ssh    <id>                SSH into a running session
-  session terminate <id> [--wait]    Terminate a session
-  session availability [opts]        Check GPU availability
-  session balance                    Show current credit balance
+Examples:
+  mirc install
+  mirc install --prefix ~/bin --force
+EOF
+    exit 0
+}
 
-Volume subcommands:
-  volume create [opts]               Create a persistent block volume
-  volume list   [filter opts]        List volumes
-  volume status <id>                 Show volume details
-  volume extend <id> --size-gb N     Extend (resize) a volume
-  volume delete <id> [--wait]        Delete a volume
+session_help() {
+    cat <<'EOF'
+Usage: mirc session <subcommand> [args...]
 
-session create options:
-  --name NAME             Session name (required, 1-64 chars)
-  --image URI             Container image URI (required)
-  --gpu  TYPE             GPU type, e.g. T4, A100, H100_SXM (required)
-  --command CMD           Command to run (omit for interactive)
+Compute session operations.
+
+Subcommands:
+  create [opts]              Create a new compute session
+  list   [filter opts]       List sessions (paginated, filterable)
+  status <id>                Show session status and details
+  logs   <id> [-n N]         Tail container logs (default 50 lines)
+  ssh    <id>                SSH into a running session
+  terminate <id> [--wait]    Terminate a session
+  availability [opts]        Check GPU availability and pricing
+  balance                    Show current credit balance
+
+State values:     submitted, provisioned, started, completed, failed,
+                  stopped, provision_failed, terminated
+Operation values: provisioning, starting, stopping, terminating
+                  (primary values; backend prefix-matches compounds)
+
+Run `mirc session <subcommand> --help` for details on a specific command.
+EOF
+    exit 0
+}
+
+session_create_help() {
+    cat <<'EOF'
+Usage: mirc session create --name NAME --image URI --gpu TYPE [opts]
+
+Create a new compute session. By default returns immediately with the
+session id; pass --wait to block until SSH is ready.
+
+Required:
+  --name NAME             Session name (1-64 chars)
+  --image URI             Container image URI
+  --gpu  TYPE             GPU type, e.g. T4, A100, H100_SXM, RTX_96G
+
+Optional:
+  --command CMD           Command to run (omit for interactive shell)
   --provider PROV         Provider hint (e.g. verda)
   --location LOC          Location hint (e.g. FIN-01)
   --gpu-count N           Number of GPUs (default 1)
@@ -92,28 +190,105 @@ session create options:
   --max-duration SECS     Max session duration in seconds
   --wait                  Block until state=started and SSH is ready
 
-session list / volume list filter + pagination options:
+Examples:
+  mirc session create --name training --image nvcr.io/nvidia/pytorch:24.01-py3 --gpu T4
+  mirc session create --name demo --image docker.io/nvidia/cuda:12.2.0-base-ubuntu22.04 \
+      --gpu RTX_96G --provider verda --location FIN-03 \
+      --volume data1:/data --auto-terminate never --wait
+EOF
+    exit 0
+}
+
+session_list_help() {
+    cat <<'EOF'
+Usage: mirc session list [filter opts]
+
+List sessions (paginated, sorted newest-first). Default filter excludes
+no states — pass an explicit --state or --state-not if you want to narrow.
+
+Filter options:
   --state CSV             Inclusion list, e.g. "started,provisioned"
   --state-not CSV         Exclusion list
   --operation CSV         Primary operation inclusion (e.g. "starting,stopping")
   --operation-not CSV     Primary operation exclusion
   --updated-after RFC3339 e.g. 2026-05-03T10:00:00Z
   --updated-before RFC3339
+
+Pagination options:
   --limit N               Page size, 1-100, default 50
-  --offset N              Skip the first N items in the (sorted) result
+  --offset N              Skip the first N items
 
-volume create options:
-  --name NAME             Volume name (required)
-  --size-gb N             Size in GB (required)
-  --provider PROV         Provider hint (e.g. verda)
-  --location LOC          Location hint (e.g. FIN-01)
-  --wait                  Block until state=provisioned
+Examples:
+  mirc session list
+  mirc session list --state started
+  mirc session list --state-not terminated,completed --updated-after 2026-05-01T00:00:00Z
+  mirc session list --operation starting
+EOF
+    exit 0
+}
 
-volume extend options:
-  --size-gb N             New size in GB (must be larger than current)
+session_status_help() {
+    cat <<'EOF'
+Usage: mirc session status <session_id>
 
-session availability options:
-  --provider PROV         Filter by provider
+Print full session details (state, operation, ssh endpoint, billing,
+events) as JSON.
+
+Example:
+  mirc session status 4ed5acf3-b78f-4e5a-bd37-362c418b64fa
+EOF
+    exit 0
+}
+
+session_logs_help() {
+    cat <<'EOF'
+Usage: mirc session logs <session_id> [-n N]
+
+Tail the session's container logs.
+
+Options:
+  -n N    Number of lines from the end (default 50)
+
+Example:
+  mirc session logs 4ed5acf3-... -n 200
+EOF
+    exit 0
+}
+
+session_ssh_help() {
+    cat <<'EOF'
+Usage: mirc session ssh <session_id>
+
+Open an interactive SSH connection to a running session, using the SSH
+key cached during `mirc auth`.
+
+Example:
+  mirc session ssh 4ed5acf3-b78f-4e5a-bd37-362c418b64fa
+EOF
+    exit 0
+}
+
+session_terminate_help() {
+    cat <<'EOF'
+Usage: mirc session terminate <session_id> [--wait]
+
+Terminate a session. Returns immediately by default; pass --wait to
+block until the session reaches a terminal state.
+
+Example:
+  mirc session terminate 4ed5acf3-... --wait
+EOF
+    exit 0
+}
+
+session_availability_help() {
+    cat <<'EOF'
+Usage: mirc session availability [opts]
+
+Check GPU availability and pricing across providers.
+
+Options:
+  --provider PROV         Filter by provider (e.g. verda, gcp)
   --location LOC          Filter by location
   --family FAM            Filter by GPU family (comma-separated)
   --form-factor FF        Filter by form factor (e.g. SXM)
@@ -125,52 +300,147 @@ session availability options:
                           (one human-readable line, or JSON with --json)
   --json                  Machine-readable output (only with --cheapest)
 
-Session state values:
-  submitted, provisioned, started, completed, failed,
-  stopped, provision_failed, terminated
-
-Session operation values (primary, for filters):
-  provisioning, starting, stopping, terminating
-
-Volume state values:
-  submitted, provisioned, failed, deleted
-
-Volume operation values (primary, for filters):
-  provisioning, resizing, deleting
-
 Examples:
-  mirc install                              # symlink ~/.local/bin/mirc
-  mirc install --prefix ~/bin --force
-  mirc auth --key ~/.ssh/mimiry
-  mirc session create --name training --image nvcr.io/nvidia/pytorch:24.01-py3 --gpu T4
-  mirc session list --state started
-  mirc session list --state-not terminated,completed --updated-after 2026-05-01T00:00:00Z
-  mirc session list --operation starting
-  mirc session status abc123
-  mirc session ssh abc123
-  mirc session terminate abc123 --wait
   mirc session availability --family H100 --provider verda
   mirc session availability --cheapest --provider verda --json
-  mirc session balance
-  mirc volume create --name data1 --size-gb 100 --wait
-  mirc volume list --state provisioned
-  mirc volume extend vol-abc --size-gb 200
-  mirc volume delete vol-abc --wait
-
-Demo: cheapest GPU + persistent volume + interactive session
-  pick=$(mirc session availability --cheapest --provider verda --json)
-  gpu=$(echo "$pick"  | jq -r .gpu)
-  loc=$(echo "$pick"  | jq -r .location)
-  mirc volume create --name demo-vol --size-gb 10 --location "$loc" --wait
-  mirc session create \
-      --name demo --image docker.io/nvidia/cuda:12.2.0-base-ubuntu22.04 \
-      --gpu "$gpu" --provider verda --location "$loc" \
-      --volume demo-vol:/data --auto-terminate never \
-      --command 'nvidia-smi | tee /data/nvidia-smi-log; sleep infinity' \
-      --wait
 EOF
     exit 0
 }
+
+session_balance_help() {
+    cat <<'EOF'
+Usage: mirc session balance
+
+Print the authenticated user's current credit balance, currency, and
+estimated burn rate.
+EOF
+    exit 0
+}
+
+volume_help() {
+    cat <<'EOF'
+Usage: mirc volume <subcommand> [args...]
+
+Block volume operations. Volumes are persistent across sessions and
+mounted on session create via `--volume NAME:PATH`.
+
+Subcommands:
+  create [opts]              Create a persistent block volume
+  list   [filter opts]       List volumes (paginated, filterable)
+  status <id>                Show volume details
+  extend <id> --size-gb N    Extend (resize) a volume
+  delete <id> [--wait]       Delete a volume
+
+State values:     submitted, provisioned, failed, deleted
+Operation values: provisioning, resizing, deleting
+                  (primary values; backend prefix-matches compounds)
+
+Default `volume list` hides deleted volumes. Pass --state deleted (or
+include it in --state) to see history. Ownership of a deleted volume
+stays with the org for the retention period.
+
+Run `mirc volume <subcommand> --help` for details on a specific command.
+EOF
+    exit 0
+}
+
+volume_create_help() {
+    cat <<'EOF'
+Usage: mirc volume create --name NAME --size-gb N [opts]
+
+Create a persistent block volume.
+
+Required:
+  --name NAME             Volume name (unique within the org)
+  --size-gb N             Size in GB (provider minimum applies — Verda: 100)
+
+Optional:
+  --provider PROV         Provider hint (e.g. verda)
+  --location LOC          Location hint (e.g. FIN-01) — should match
+                          the location of any session you plan to attach to
+  --wait                  Block until state=provisioned
+
+Examples:
+  mirc volume create --name data1 --size-gb 100 --wait
+  mirc volume create --name demo-vol --size-gb 100 --provider verda --location FIN-03 --wait
+EOF
+    exit 0
+}
+
+volume_list_help() {
+    cat <<'EOF'
+Usage: mirc volume list [filter opts]
+
+List volumes (paginated, sorted newest-first). Default hides deleted
+volumes — pass --state deleted to see history.
+
+Filter options:
+  --state CSV             Inclusion list, e.g. "provisioned,deleted"
+  --state-not CSV         Exclusion list
+  --operation CSV         Primary operation inclusion (e.g. "deleting")
+  --operation-not CSV     Primary operation exclusion
+  --updated-after RFC3339
+  --updated-before RFC3339
+
+Pagination options:
+  --limit N               Page size, 1-100, default 50
+  --offset N              Skip the first N items
+
+Examples:
+  mirc volume list                       # active volumes only
+  mirc volume list --state deleted       # history
+  mirc volume list --state provisioned,deleted
+EOF
+    exit 0
+}
+
+volume_status_help() {
+    cat <<'EOF'
+Usage: mirc volume status <volume_id>
+
+Print full volume details (state, operation, size, provider id,
+attached_to, billing) as JSON. Works for deleted volumes too — the
+per-volume cache key is preserved for the retention period.
+
+Example:
+  mirc volume status cd2d52f6-708d-48bd-92f7-2699951d8f38
+EOF
+    exit 0
+}
+
+volume_extend_help() {
+    cat <<'EOF'
+Usage: mirc volume extend <volume_id> --size-gb N
+
+Increase the size of a volume. New size must be strictly larger than
+the current size; volumes cannot be shrunk.
+
+Required:
+  --size-gb N    New size in GB
+
+Example:
+  mirc volume extend vol-abc --size-gb 200
+EOF
+    exit 0
+}
+
+volume_delete_help() {
+    cat <<'EOF'
+Usage: mirc volume delete <volume_id> [--wait]
+
+Delete a volume. Returns immediately by default; pass --wait to block
+until the volume reaches state=deleted (or 404). Deleted volumes stay
+queryable via `mirc volume status` and `mirc volume list --state deleted`
+for the retention period.
+
+Example:
+  mirc volume delete cd2d52f6-... --wait
+EOF
+    exit 0
+}
+
+# Entry-point dispatch when no subcommand was supplied; prints top help.
+usage() { top_help; }
 
 # URL-encode a value while preserving comma (used as filter separator).
 urlencode() {
@@ -286,6 +556,7 @@ parse_list_filters() {
 # ── auth ─────────────────────────────────────────────────────────────
 
 cmd_auth() {
+    _has_help_flag "$@" && auth_help
     ensure_token
     echo "Token cached at $TOKEN_FILE (valid ~55 min)"
 }
@@ -298,6 +569,7 @@ cmd_auth() {
 # doesn't exist yet, the running script copies itself there first — so
 # `mirc install` works straight out of a fresh repo checkout.
 cmd_install() {
+    _has_help_flag "$@" && install_help
     local prefix="$HOME/.local/bin"
     local force=false
     local canonical="$HOME/.claude/skills/mimiry-softlaunch/scripts/mirc.sh"
@@ -376,6 +648,7 @@ cmd_install() {
 # ── session subcommands ──────────────────────────────────────────────
 
 cmd_session_create() {
+    _has_help_flag "$@" && session_create_help
     local name="" image="" gpu="" command="" provider="" location=""
     local gpu_count=1 auto_terminate="" no_ssh=false max_duration=""
     local wait_flag=false
@@ -579,18 +852,21 @@ cmd_session_create() {
 }
 
 cmd_session_list() {
+    _has_help_flag "$@" && session_list_help
     parse_list_filters "$@"
     ensure_token
     api_get "/sessions${QS}" | jq .
 }
 
 cmd_session_status() {
+    _has_help_flag "$@" && session_status_help
     [ -n "${1:-}" ] || die "usage: mirc session status <session_id>"
     ensure_token
     api_get "/sessions/$1" | jq .
 }
 
 cmd_session_logs() {
+    _has_help_flag "$@" && session_logs_help
     local id="" lines=50
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -616,6 +892,7 @@ cmd_session_logs() {
 }
 
 cmd_session_ssh() {
+    _has_help_flag "$@" && session_ssh_help
     [ -n "${1:-}" ] || die "usage: mirc session ssh <session_id>"
     ensure_token
     resolve_key
@@ -641,6 +918,7 @@ cmd_session_ssh() {
 }
 
 cmd_session_terminate() {
+    _has_help_flag "$@" && session_terminate_help
     local id="" wait_flag=false
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -689,6 +967,7 @@ cmd_session_terminate() {
 }
 
 cmd_session_availability() {
+    _has_help_flag "$@" && session_availability_help
     local provider="" location="" family="" form_factor="" min_vram=""
     local include_all=false include_cpu=false detail=""
     local cheapest=false as_json=false
@@ -766,14 +1045,19 @@ cmd_session_availability() {
 }
 
 cmd_session_balance() {
+    _has_help_flag "$@" && session_balance_help
     ensure_token
     api_get "/balance" | jq .
 }
 
-# Dispatch a session subcommand.
+# Dispatch a session subcommand. Recognises --help / -h / no-args / `help`
+# at the namespace level and prints session_help; defers per-command help
+# to the individual cmd_session_* functions.
 cmd_session() {
     local sub="${1:-}"
-    [ -n "$sub" ] || die "usage: mirc session <subcommand> [options]"
+    case "$sub" in
+        ""|--help|-h|help) session_help ;;
+    esac
     shift
     case "$sub" in
         create)       cmd_session_create "$@" ;;
@@ -784,13 +1068,14 @@ cmd_session() {
         terminate)    cmd_session_terminate "$@" ;;
         availability) cmd_session_availability "$@" ;;
         balance)      cmd_session_balance "$@" ;;
-        *) die "unknown session subcommand: $sub (run 'mirc --help' for usage)" ;;
+        *) die "unknown session subcommand: $sub (run 'mirc session --help' for the list)" ;;
     esac
 }
 
 # ── volume subcommands ───────────────────────────────────────────────
 
 cmd_volume_create() {
+    _has_help_flag "$@" && volume_create_help
     local name="" size_gb="" provider="" location="" wait_flag=false
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -911,18 +1196,21 @@ cmd_volume_create() {
 }
 
 cmd_volume_list() {
+    _has_help_flag "$@" && volume_list_help
     parse_list_filters "$@"
     ensure_token
     api_get "/volumes${QS}" | jq .
 }
 
 cmd_volume_status() {
+    _has_help_flag "$@" && volume_status_help
     [ -n "${1:-}" ] || die "usage: mirc volume status <volume_id>"
     ensure_token
     api_get "/volumes/$1" | jq .
 }
 
 cmd_volume_extend() {
+    _has_help_flag "$@" && volume_extend_help
     local id="" size_gb=""
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -955,6 +1243,7 @@ cmd_volume_extend() {
 }
 
 cmd_volume_delete() {
+    _has_help_flag "$@" && volume_delete_help
     local id="" wait_flag=false
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -1000,10 +1289,12 @@ cmd_volume_delete() {
     done
 }
 
-# Dispatch a volume subcommand.
+# Dispatch a volume subcommand. Same pattern as cmd_session.
 cmd_volume() {
     local sub="${1:-}"
-    [ -n "$sub" ] || die "usage: mirc volume <subcommand> [options]"
+    case "$sub" in
+        ""|--help|-h|help) volume_help ;;
+    esac
     shift
     case "$sub" in
         create)    cmd_volume_create "$@" ;;
@@ -1011,7 +1302,7 @@ cmd_volume() {
         status)    cmd_volume_status "$@" ;;
         extend)    cmd_volume_extend "$@" ;;
         delete)    cmd_volume_delete "$@" ;;
-        *) die "unknown volume subcommand: $sub (run 'mirc --help' for usage)" ;;
+        *) die "unknown volume subcommand: $sub (run 'mirc volume --help' for the list)" ;;
     esac
 }
 
