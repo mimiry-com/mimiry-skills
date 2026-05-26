@@ -718,8 +718,8 @@ cmd_session_create() {
 
     [ -n "$name" ]  || die "session create requires --name"
     [ -n "$image" ] || die "session create requires --image"
-    if [ -z "$gpu" ] && [ -z "$family" ] && [ -z "$min_vram" ] && [ -z "$form_factor" ]; then
-        die "session create requires --gpu OR at least one of --family / --min-vram / --form-factor"
+    if [ -z "$gpu" ] && [ -z "$family" ] && [ -z "$min_vram" ] && [ -z "$form_factor" ] && [ -z "$priority" ]; then
+        die "session create requires --gpu, --cheapest, --priority, or at least one of --family / --min-vram / --form-factor"
     fi
 
     need jq
