@@ -168,15 +168,23 @@ EOF
 
 session_create_help() {
     cat <<'EOF'
-Usage: mirc session create --name NAME --image URI --gpu TYPE [opts]
+Usage: mirc session create --name NAME --image URI (--gpu TYPE | <criteria>) [opts]
 
 Create a new compute session. By default returns immediately with the
 session id; pass --wait to block until SSH is ready.
 
+The server picks a GPU either from an explicit --gpu list or from criteria
+filters. With criteria, on capacity failure at the locked location the
+server retries with the next-best candidate (up to --max-attempts).
+
 Required:
   --name NAME             Session name (1-64 chars)
   --image URI             Container image URI
-  --gpu  TYPE             GPU type, e.g. T4, A100, H100_SXM, RTX_96G
+  (one of:)
+    --gpu  TYPE[,TYPE…]   Explicit GPU type list, in preference order
+    --family FAM[,FAM…]   Criteria: GPU family (e.g. H100,A100), in pref order
+    --min-vram N          Criteria: minimum VRAM in GB
+    --form-factor FF      Criteria: PCIe or SXM
 
 Optional:
   --command CMD           Command to run (omit for interactive shell)
@@ -188,6 +196,11 @@ Optional:
   --auto-terminate MODE   on_complete | on_success | never
   --no-ssh                Disable SSH access
   --max-duration SECS     Max session duration in seconds
+  --priority KEY[,KEY…]   Ordered sort keys: PRICE | GPU | FAMILY |
+                          FORM_FACTOR | VRAM. Default ["GPU"] when --gpu
+                          is the only criterion; ["PRICE"] otherwise.
+  --cheapest              Shortcut for --priority PRICE
+  --max-attempts N        Retry cap on provider capacity errors (default 3)
   --wait                  Block until state=started and SSH is ready
 
 Examples:
@@ -195,6 +208,10 @@ Examples:
   mirc session create --name demo --image docker.io/nvidia/cuda:12.2.0-base-ubuntu22.04 \
       --gpu RTX_96G --provider verda --location FIN-03 \
       --volume data1:/data --auto-terminate never --wait
+  mirc session create --name explore --image docker.io/nvidia/cuda:12.2.0-base-ubuntu22.04 \
+      --cheapest --provider verda --location FIN-02 --wait
+  mirc session create --name h100-train --image nvcr.io/nvidia/pytorch:24.01-py3 \
+      --family H100 --min-vram 80 --priority PRICE
 EOF
     exit 0
 }
@@ -662,6 +679,8 @@ cmd_session_create() {
     local name="" image="" gpu="" command="" provider="" location=""
     local gpu_count=1 auto_terminate="" no_ssh=false max_duration=""
     local wait_flag=false
+    local family="" min_vram="" form_factor="" priority="" max_attempts=""
+    local cheapest=false
     local -a env_vars=()
     local -a volumes=()
 
@@ -679,14 +698,29 @@ cmd_session_create() {
             --auto-terminate) auto_terminate="${2:?'--auto-terminate requires a mode'}"; shift 2 ;;
             --no-ssh)         no_ssh=true; shift ;;
             --max-duration)   max_duration="${2:?'--max-duration' requires a value}"; shift 2 ;;
+            --family)         family="${2:?'--family' requires a value}"; shift 2 ;;
+            --min-vram)       min_vram="${2:?'--min-vram' requires a value}"; shift 2 ;;
+            --form-factor)    form_factor="${2:?'--form-factor' requires a value}"; shift 2 ;;
+            --priority)       priority="${2:?'--priority' requires a value}"; shift 2 ;;
+            --max-attempts)   max_attempts="${2:?'--max-attempts' requires a value}"; shift 2 ;;
+            --cheapest)       cheapest=true; shift ;;
             --wait)           wait_flag=true; shift ;;
             *)                die "unknown option for session create: $1" ;;
         esac
     done
 
+    if [ "$cheapest" = true ]; then
+        if [ -n "$priority" ]; then
+            die "--cheapest is shorthand for --priority PRICE; pick one"
+        fi
+        priority="PRICE"
+    fi
+
     [ -n "$name" ]  || die "session create requires --name"
     [ -n "$image" ] || die "session create requires --image"
-    [ -n "$gpu" ]   || die "session create requires --gpu"
+    if [ -z "$gpu" ] && [ -z "$family" ] && [ -z "$min_vram" ] && [ -z "$form_factor" ]; then
+        die "session create requires --gpu OR at least one of --family / --min-vram / --form-factor"
+    fi
 
     need jq
     ensure_token
@@ -703,17 +737,38 @@ cmd_session_create() {
     json=$(jq -n \
         --arg name "$name" \
         --arg image "$image" \
-        --arg gpu "$gpu" \
         --argjson gpu_count "$gpu_count" \
         --arg key "$pub_key" \
         --arg at_mode "$auto_terminate" \
         '{
             name: $name,
             image: {uri: $image},
-            gpu: {types: [$gpu], count: $gpu_count},
+            gpu: {count: $gpu_count},
             ssh_public_key: $key,
             auto_terminate: {mode: $at_mode}
         }')
+
+    # GPU selectors — each as a list. --gpu / --family / --form-factor accept
+    # comma-separated values where order = preference. --min-vram is a single
+    # int (wrapped as a single-element list to match the API's []int shape).
+    if [ -n "$gpu" ]; then
+        json=$(echo "$json" | jq --arg v "$gpu" '.gpu.types = ($v | split(","))')
+    fi
+    if [ -n "$family" ]; then
+        json=$(echo "$json" | jq --arg v "$family" '.gpu.family = ($v | split(","))')
+    fi
+    if [ -n "$form_factor" ]; then
+        json=$(echo "$json" | jq --arg v "$form_factor" '.gpu.form_factor = ($v | split(","))')
+    fi
+    if [ -n "$min_vram" ]; then
+        json=$(echo "$json" | jq --argjson v "$min_vram" '.gpu.vram_gb = [$v]')
+    fi
+    if [ -n "$priority" ]; then
+        json=$(echo "$json" | jq --arg v "$priority" '.gpu.priority = ($v | split(","))')
+    fi
+    if [ -n "$max_attempts" ]; then
+        json=$(echo "$json" | jq --argjson v "$max_attempts" '.gpu.max_attempts = $v')
+    fi
 
     if [ -n "$command" ]; then
         json=$(echo "$json" | jq --arg cmd "$command" '. + {command: $cmd}')
