@@ -201,6 +201,8 @@ Optional:
                           is the only criterion; ["PRICE"] otherwise.
   --cheapest              Shortcut for --priority PRICE
   --max-attempts N        Retry cap on provider capacity errors (default 3)
+  --max-price EUR         Reject candidates above this hourly rate (EUR,
+                          post-margin — same number availability shows)
   --wait                  Block until state=started and SSH is ready
 
 Examples:
@@ -679,7 +681,7 @@ cmd_session_create() {
     local name="" image="" gpu="" command="" provider="" location=""
     local gpu_count=1 auto_terminate="" no_ssh=false max_duration=""
     local wait_flag=false
-    local family="" min_vram="" form_factor="" priority="" max_attempts=""
+    local family="" min_vram="" form_factor="" priority="" max_attempts="" max_price=""
     local cheapest=false
     local -a env_vars=()
     local -a volumes=()
@@ -703,6 +705,7 @@ cmd_session_create() {
             --form-factor)    form_factor="${2:?'--form-factor' requires a value}"; shift 2 ;;
             --priority)       priority="${2:?'--priority' requires a value}"; shift 2 ;;
             --max-attempts)   max_attempts="${2:?'--max-attempts' requires a value}"; shift 2 ;;
+            --max-price)      max_price="${2:?'--max-price' requires a value in EUR}"; shift 2 ;;
             --cheapest)       cheapest=true; shift ;;
             --wait)           wait_flag=true; shift ;;
             *)                die "unknown option for session create: $1" ;;
@@ -768,6 +771,9 @@ cmd_session_create() {
     fi
     if [ -n "$max_attempts" ]; then
         json=$(echo "$json" | jq --argjson v "$max_attempts" '.gpu.max_attempts = $v')
+    fi
+    if [ -n "$max_price" ]; then
+        json=$(echo "$json" | jq --argjson v "$max_price" '.gpu.max_hourly_rate = $v')
     fi
 
     if [ -n "$command" ]; then
