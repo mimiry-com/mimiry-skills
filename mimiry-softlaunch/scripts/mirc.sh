@@ -270,10 +270,12 @@ Usage: mirc session logs <session_id> [-n N]
 Tail the session's container logs.
 
 Options:
-  -n N    Number of lines from the end (default 50)
+  -n N            Number of lines from the end (default 50)
+  -f, --follow    Stream new lines as they arrive; stop on terminal state.
 
 Example:
   mirc session logs 4ed5acf3-... -n 200
+  mirc session logs 4ed5acf3-... --follow
 EOF
     exit 0
 }
@@ -876,10 +878,28 @@ cmd_session_create() {
                 operation=$(echo "$detail" | jq -r '.operation // ""')
                 ssh_host=$(echo "$detail" | jq -r '.ssh.host // empty')
                 case "$state" in
-                    failed|provision_failed|terminated|stopped)
+                    failed|provision_failed)
+                        # Hard failure — VM never made it to a useful state.
                         echo "" >&2
                         echo "$detail" | jq . >&2
                         die "session reached terminal state=$state before becoming ready"
+                        ;;
+                    completed|terminated|stopped)
+                        # Session ran AND finished while we were polling — for
+                        # auto_terminate=on_complete with a short --command,
+                        # the container can exit between two of our poll cycles.
+                        # Treat as success when exit_code=0 (or absent); show
+                        # the full record so the caller sees what happened.
+                        local exit_code
+                        exit_code=$(echo "$detail" | jq -r '.exit_code // "null"')
+                        if [ "$exit_code" = "0" ] || [ "$exit_code" = "null" ]; then
+                            printf "\rstate=%-12s operation=%-30s (%ds) — finished\n" "$state" "$operation" "$elapsed" >&2
+                            echo "$detail" | jq .
+                            return
+                        fi
+                        echo "" >&2
+                        echo "$detail" | jq . >&2
+                        die "session reached terminal state=$state with exit_code=$exit_code"
                         ;;
                     started)
                         if [ -n "$ssh_host" ]; then
@@ -949,28 +969,80 @@ cmd_session_status() {
 
 cmd_session_logs() {
     _has_help_flag "$@" && session_logs_help
-    local id="" lines=50
+    local id="" lines=50 follow=false
     while [ $# -gt 0 ]; do
         case "$1" in
             -n) lines="${2:?'-n' requires a number}"; shift 2 ;;
+            -f|--follow) follow=true; shift ;;
             *)  id="$1"; shift ;;
         esac
     done
-    [ -n "$id" ] || die "usage: mirc session logs <session_id> [-n N]"
+    [ -n "$id" ] || die "usage: mirc session logs <session_id> [-n N] [-f|--follow]"
     ensure_token
 
-    local resp http_code
-    resp=$(curl -s -w '\n%{http_code}' "$API/sessions/$id/logs?tail=$lines" \
-        -H "Authorization: Bearer $MIMIRY_TOKEN")
-    http_code=$(echo "$resp" | tail -1)
-    resp=$(echo "$resp" | sed '$d')
+    if [ "$follow" = false ]; then
+        # Single-shot — current behavior.
+        local resp http_code
+        resp=$(curl -s -w '\n%{http_code}' "$API/sessions/$id/logs?tail=$lines" \
+            -H "Authorization: Bearer $MIMIRY_TOKEN")
+        http_code=$(echo "$resp" | tail -1)
+        resp=$(echo "$resp" | sed '$d')
 
-    case "$http_code" in
-        200) echo "$resp" | jq -r '.logs' ;;
-        503) echo "VM is still setting up — try again in a few seconds" >&2; exit 1 ;;
-        409) echo "Session is not running (check: mirc session status $id)" >&2; exit 1 ;;
-        *)   echo "error (HTTP $http_code): $(echo "$resp" | jq -r '.message // .error // .')" >&2; exit 1 ;;
-    esac
+        case "$http_code" in
+            200) echo "$resp" | jq -r '.logs' ;;
+            503) echo "VM is still setting up — try again in a few seconds" >&2; exit 1 ;;
+            409) echo "Session is not running (check: mirc session status $id)" >&2; exit 1 ;;
+            *)   echo "error (HTTP $http_code): $(echo "$resp" | jq -r '.message // .error // .')" >&2; exit 1 ;;
+        esac
+        return
+    fi
+
+    # --follow: poll every 2s; print only NEW lines; stop on terminal state.
+    # Each rendered line starts `YYYY-MM-DDTHH:MM:SS.mmmZ ` — we parse that
+    # to track our cursor and skip lines we've already shown.
+    #
+    # tail=2000 stays comfortably under Loki's default max_entries_limit_per_query
+    # (5000) so the request never trips a 503 from the log store.
+    local last_ts=""
+    local terminal_pat='^(completed|terminated|failed|provision_failed|stopped)$'
+    while :; do
+        ensure_token
+
+        local logs_resp logs_code logs_body
+        logs_resp=$(curl -s -w '\n%{http_code}' "$API/sessions/$id/logs?tail=2000" \
+            -H "Authorization: Bearer $MIMIRY_TOKEN")
+        logs_code=$(echo "$logs_resp" | tail -1)
+        logs_body=$(echo "$logs_resp" | sed '$d')
+
+        if [ "$logs_code" = "200" ]; then
+            local new_lines
+            if [ -z "$last_ts" ]; then
+                new_lines=$(echo "$logs_body" | jq -r '.logs // empty')
+            else
+                # Skip every line with timestamp <= last_ts (cursor advances
+                # past dupes the server may legitimately return).
+                new_lines=$(echo "$logs_body" | jq -r '.logs // empty' | awk -v c="$last_ts" '$1 > c { print }')
+            fi
+            if [ -n "$new_lines" ]; then
+                echo "$new_lines"
+                last_ts=$(echo "$new_lines" | tail -1 | awk '{print $1}')
+            fi
+        elif [ "$logs_code" != "503" ]; then
+            # 503 is logs-store-temporarily-unavailable; quietly retry. Any
+            # other non-200 is a real error worth surfacing.
+            echo "follow: HTTP $logs_code — $(echo "$logs_body" | jq -r '.message // .error // .')" >&2
+        fi
+
+        # Check session state — stop on terminal.
+        local state_resp state
+        state_resp=$(curl -s "$API/sessions/$id" -H "Authorization: Bearer $MIMIRY_TOKEN")
+        state=$(echo "$state_resp" | jq -r '.state // "unknown"')
+        if [[ "$state" =~ $terminal_pat ]]; then
+            return
+        fi
+
+        sleep 2
+    done
 }
 
 cmd_session_ssh() {
