@@ -205,15 +205,29 @@ Optional:
                           post-margin — same number availability shows)
   --wait                  Block until state=started and SSH is ready
 
+GPU naming:
+  Mimiry canonical names follow the pattern {Family}_{Vram}G_{FormFactor}.
+  Examples: T4_16G_PCIe, A100_80G_SXM, H100_80G_SXM, H200_141G_SXM.
+  Legacy short forms (T4, A100_80G, H100) continue to work — api-compute
+  translates them at the API boundary. New scripts should prefer the
+  canonical form for clarity.
+  Full spec: plans/architecture/GPU-NAMING-STANDARD.md
+
 Examples:
-  mirc session create --name training --image nvcr.io/nvidia/pytorch:24.01-py3 --gpu T4
+  # Canonical (preferred):
+  mirc session create --name training --image nvcr.io/nvidia/pytorch:24.01-py3 --gpu T4_16G_PCIe
+  mirc session create --name explore --image docker.io/nvidia/cuda:12.2.0-base-ubuntu22.04 \
+      --gpu A100_80G_SXM --provider verda --wait
+  # Criteria-based (server picks the specific canonical name):
+  mirc session create --name h100-train --image nvcr.io/nvidia/pytorch:24.01-py3 \
+      --family H100 --min-vram 80 --priority PRICE
   mirc session create --name demo --image docker.io/nvidia/cuda:12.2.0-base-ubuntu22.04 \
       --gpu RTX_96G --provider verda --location FIN-03 \
       --volume data1:/data --auto-terminate never --wait
+  # Legacy short forms (still accepted — translated to canonical at API entry):
+  mirc session create --name training --image nvcr.io/nvidia/pytorch:24.01-py3 --gpu T4
   mirc session create --name explore --image docker.io/nvidia/cuda:12.2.0-base-ubuntu22.04 \
       --cheapest --provider verda --location FIN-02 --wait
-  mirc session create --name h100-train --image nvcr.io/nvidia/pytorch:24.01-py3 \
-      --family H100 --min-vram 80 --priority PRICE
 EOF
     exit 0
 }
