@@ -35,6 +35,7 @@ TOKEN_FILE="/tmp/mirc-token-$(id -u)"
 KEY_FILE="/tmp/mirc-key-$(id -u)"
 API_BASE="https://softlaunch.mimiry.com"
 API="${API_BASE}/api/compute/v1"
+AUTH_API="${API_BASE}/api/auth/v1"
 TOKEN_MAX_AGE=3300  # 55 minutes
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -69,6 +70,7 @@ Commands:
   install                Symlink mirc into a user-space PATH directory
   session <subcommand>   Compute session operations
   volume  <subcommand>   Block volume operations
+  ssh     <subcommand>   Register SSH keys via the guided 2FA flow
 
 Global options:
   --key <path>    Path to SSH key (required on first use, remembered after)
@@ -1485,6 +1487,335 @@ cmd_volume() {
     esac
 }
 
+# ── ssh subcommands ──────────────────────────────────────────────────
+
+ssh_help() {
+    cat <<'EOF'
+Usage: mirc ssh <subcommand> [args...]
+
+SSH-key management via the platform's guided registration flow.
+
+Subcommands:
+  register --title NAME [--key PATH]   Register a new SSH public key.
+                                       Requires portal 2FA verification.
+
+Run `mirc ssh <subcommand> --help` for details.
+EOF
+    exit 0
+}
+
+ssh_register_help() {
+    cat <<'EOF'
+Usage: mirc ssh register --title NAME [--key <public-key-path>]
+
+Register a new SSH public key with your account via the guided flow:
+  1. mirc calls the server to open a registration.
+  2. You open a portal URL in your browser and complete 2FA.
+  3. mirc uploads the public key and signs a server challenge to prove
+     ownership of the matching private key.
+  4. Server publishes the SSH-key-add event; registration completes.
+
+Required:
+  --title NAME         Human-readable name for the key (e.g. "MacBook Pro 2026").
+
+Optional:
+  --key PATH           Path to the SSH PUBLIC key file to register.
+                       Default: ~/.ssh/id_ed25519.pub, then ~/.ssh/id_rsa.pub.
+                       The matching private key (PATH without .pub) is used
+                       to sign the ownership challenge.
+
+Notes:
+  - mirc does NOT auto-generate keys. If neither default exists and --key is
+    not supplied, run: ssh-keygen -t ed25519
+  - Requires an existing authenticated mirc session (`mirc auth` first).
+  - If interrupted mid-flow, mirc best-effort cancels the pending
+    registration on exit.
+
+Example:
+  mirc ssh register --title "MacBook Pro 2026"
+  mirc ssh register --title "laptop-work" --key ~/.ssh/mimiry_ed25519.pub
+EOF
+    exit 0
+}
+
+# Tracks a pending registration id so the EXIT trap can best-effort cancel
+# if the user aborts before completion.
+SSH_REGISTER_PENDING_ID=""
+
+_ssh_register_cleanup() {
+    local rid="${SSH_REGISTER_PENDING_ID:-}"
+    [ -n "$rid" ] || return 0
+    SSH_REGISTER_PENDING_ID=""
+    # Fire and forget with a short timeout; ignore errors — we're on the way out.
+    curl -sS --max-time 2 -X DELETE \
+        "${AUTH_API}/ssh-keys/register/${rid}" \
+        -H "Authorization: Bearer ${MIMIRY_TOKEN:-}" >/dev/null 2>&1 || true
+}
+
+# Extract a human-readable error string from a curl response body (JSON or text).
+_ssh_register_err_msg() {
+    local body="$1"
+    local msg
+    msg=$(echo "$body" | jq -r '.message // .error // empty' 2>/dev/null || true)
+    if [ -n "$msg" ] && [ "$msg" != "null" ]; then
+        printf '%s' "$msg"
+    else
+        # Not JSON or no error field — print a bounded snippet.
+        printf '%s' "$body" | head -c 300
+    fi
+}
+
+cmd_ssh_register() {
+    _has_help_flag "$@" && ssh_register_help
+
+    local title="" pub_key_path=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --title) title="${2:?'--title' requires a value}"; shift 2 ;;
+            --key)   pub_key_path="${2:?'--key' requires a path}"; shift 2 ;;
+            *) die "unknown option for ssh register: $1" ;;
+        esac
+    done
+
+    [ -n "$title" ] || die "ssh register requires --title <name>"
+
+    need curl; need jq; need ssh-keygen; need base64
+
+    # Resolve public key path.
+    if [ -z "$pub_key_path" ]; then
+        if   [ -f "$HOME/.ssh/id_ed25519.pub" ]; then pub_key_path="$HOME/.ssh/id_ed25519.pub"
+        elif [ -f "$HOME/.ssh/id_rsa.pub" ];     then pub_key_path="$HOME/.ssh/id_rsa.pub"
+        else
+            die "no SSH public key found at ~/.ssh/id_ed25519.pub or ~/.ssh/id_rsa.pub. Generate one with: ssh-keygen -t ed25519"
+        fi
+    fi
+    [ -f "$pub_key_path" ] || die "public key not found: $pub_key_path"
+    [ -s "$pub_key_path" ] || die "public key is empty: $pub_key_path"
+
+    local pub_contents
+    pub_contents=$(tr -d '\r\n' < "$pub_key_path")
+    case "$pub_contents" in
+        ssh-*|"ecdsa-"*|"sk-"*) : ;;
+        *) die "public key at $pub_key_path does not look like an OpenSSH public key (expected leading 'ssh-*' / 'ecdsa-*' / 'sk-*')" ;;
+    esac
+
+    local priv_key_path="${pub_key_path%.pub}"
+    [ "$priv_key_path" != "$pub_key_path" ] || die "public key path must end in .pub: $pub_key_path"
+    [ -f "$priv_key_path" ] || die "private key not found next to public key: $priv_key_path"
+
+    ensure_token
+
+    # Install cleanup trap for best-effort cancel on abort.
+    trap _ssh_register_cleanup EXIT INT TERM
+
+    # ── Step 1: init ────────────────────────────────────────────────
+    local uname_s init_body init_json init_code
+    uname_s=$(uname -s 2>/dev/null || echo unknown)
+    init_body=$(jq -n --arg title "$title" \
+                     --arg hint "mirc/0.1 (${uname_s})" \
+                     '{title: $title, client_hint: $hint}')
+
+    local resp
+    resp=$(curl -sS -w '\n%{http_code}' -X POST \
+        "${AUTH_API}/ssh-keys/register/init" \
+        -H "Authorization: Bearer $MIMIRY_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$init_body")
+    init_code=$(echo "$resp" | tail -1)
+    init_json=$(echo "$resp" | sed '$d')
+
+    case "$init_code" in
+        200|201) : ;;
+        409)
+            echo "error: you already have too many pending SSH-key registrations." >&2
+            echo "Wait for the oldest to expire (~10 min TTL) or complete/cancel one, then retry." >&2
+            echo "server: $(_ssh_register_err_msg "$init_json")" >&2
+            exit 1
+            ;;
+        401|403)
+            die "not authenticated (HTTP $init_code). Run 'mirc auth --key <path>' first."
+            ;;
+        *)
+            die "register init failed (HTTP $init_code): $(_ssh_register_err_msg "$init_json")"
+            ;;
+    esac
+
+    local reg_id verify_url
+    reg_id=$(echo "$init_json" | jq -r '.registration_id // empty')
+    verify_url=$(echo "$init_json" | jq -r '.verify_url // empty')
+    [ -n "$reg_id" ]     || die "register init returned no registration_id: $init_json"
+    [ -n "$verify_url" ] || die "register init returned no verify_url: $init_json"
+    SSH_REGISTER_PENDING_ID="$reg_id"
+
+    cat >&2 <<EOF
+
+Registration started (id: $reg_id)
+
+  1. Open in your browser: $verify_url
+  2. Complete 2FA verification.
+  3. Return here — polling for verification...
+
+EOF
+
+    # ── Step 2: poll for portal_verified ───────────────────────────
+    local max_polls=150   # 150 × 2s = 5 min
+    local poll_i=0
+    local state=""
+    while [ "$poll_i" -lt "$max_polls" ]; do
+        local sresp scode sjson
+        sresp=$(curl -sS -w '\n%{http_code}' \
+            "${AUTH_API}/ssh-keys/register/${reg_id}/status" \
+            -H "Authorization: Bearer $MIMIRY_TOKEN")
+        scode=$(echo "$sresp" | tail -1)
+        sjson=$(echo "$sresp" | sed '$d')
+
+        if [ "$scode" != "200" ]; then
+            die "status poll failed (HTTP $scode): $(_ssh_register_err_msg "$sjson")"
+        fi
+
+        state=$(echo "$sjson" | jq -r '.state // empty')
+        case "$state" in
+            initiated)
+                # keep polling
+                ;;
+            portal_verified|key_submitted|challenge_issued|key_ownership_proven)
+                break
+                ;;
+            expired)
+                SSH_REGISTER_PENDING_ID=""  # already terminal server-side
+                die "registration expired before portal 2FA was completed. Re-run 'mirc ssh register'."
+                ;;
+            cancelled)
+                SSH_REGISTER_PENDING_ID=""
+                die "registration was cancelled."
+                ;;
+            failed)
+                SSH_REGISTER_PENDING_ID=""
+                die "registration failed server-side: $(_ssh_register_err_msg "$sjson")"
+                ;;
+            completed)
+                # Nothing left to do — server already advanced past our steps.
+                SSH_REGISTER_PENDING_ID=""
+                echo "Registration already completed server-side." >&2
+                return 0
+                ;;
+            "")
+                die "status response missing 'state' field: $sjson"
+                ;;
+            *)
+                die "unexpected registration state: $state"
+                ;;
+        esac
+
+        sleep 2
+        poll_i=$(( poll_i + 1 ))
+    done
+
+    if [ "$state" = "initiated" ] || [ -z "$state" ]; then
+        die "timed out waiting for portal 2FA verification (5 min). Re-run 'mirc ssh register' to retry."
+    fi
+
+    echo "Portal 2FA verified. Submitting public key..." >&2
+
+    # ── Step 3: submit-key ─────────────────────────────────────────
+    local skbody skresp skcode skjson
+    skbody=$(jq -n --arg pk "$pub_contents" '{public_key: $pk}')
+    skresp=$(curl -sS -w '\n%{http_code}' -X POST \
+        "${AUTH_API}/ssh-keys/register/${reg_id}/submit-key" \
+        -H "Authorization: Bearer $MIMIRY_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$skbody")
+    skcode=$(echo "$skresp" | tail -1)
+    skjson=$(echo "$skresp" | sed '$d')
+
+    case "$skcode" in
+        200|201) : ;;
+        409)
+            die "this key is already registered on your account."
+            ;;
+        *)
+            die "submit-key failed (HTTP $skcode): $(_ssh_register_err_msg "$skjson")"
+            ;;
+    esac
+
+    local challenge_b64 algorithm
+    challenge_b64=$(echo "$skjson" | jq -r '.challenge // empty')
+    algorithm=$(echo "$skjson" | jq -r '.algorithm // empty')
+    [ -n "$challenge_b64" ] || die "submit-key returned no challenge: $skjson"
+    [ -n "$algorithm" ]     || die "submit-key returned no algorithm: $skjson"
+
+    echo "Signing server challenge (algorithm=${algorithm})..." >&2
+
+    # ── Step 4: sign challenge with ssh-keygen -Y sign ─────────────
+    # Write raw challenge bytes to a temp file; ssh-keygen signs the file
+    # contents. The signature lands at <tmpfile>.sig as an armored SSH sig.
+    local tmpdir chall_file sig_file sig_b64
+    tmpdir=$(mktemp -d)
+    chall_file="${tmpdir}/challenge"
+    sig_file="${chall_file}.sig"
+
+    if ! printf '%s' "$challenge_b64" | base64 -d > "$chall_file" 2>/dev/null; then
+        rm -rf "$tmpdir"
+        die "failed to base64-decode server challenge"
+    fi
+
+    if ! ssh-keygen -Y sign -f "$priv_key_path" -n "$algorithm" "$chall_file" >/dev/null 2>&1; then
+        rm -rf "$tmpdir"
+        die "ssh-keygen -Y sign failed. Ensure $priv_key_path is a valid OpenSSH private key."
+    fi
+
+    if [ ! -f "$sig_file" ]; then
+        rm -rf "$tmpdir"
+        die "ssh-keygen produced no signature file at $sig_file"
+    fi
+
+    sig_b64=$(base64 < "$sig_file" | tr -d '\n')
+    rm -rf "$tmpdir"
+
+    # ── Step 5: prove-ownership ────────────────────────────────────
+    local pobody poresp pocode pojson
+    pobody=$(jq -n --arg sig "$sig_b64" '{signature: $sig}')
+    poresp=$(curl -sS -w '\n%{http_code}' -X POST \
+        "${AUTH_API}/ssh-keys/register/${reg_id}/prove-ownership" \
+        -H "Authorization: Bearer $MIMIRY_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$pobody")
+    pocode=$(echo "$poresp" | tail -1)
+    pojson=$(echo "$poresp" | sed '$d')
+
+    case "$pocode" in
+        200|201)
+            # Server has consumed the registration — clear the pending id so
+            # the EXIT trap doesn't try to cancel a completed flow.
+            SSH_REGISTER_PENDING_ID=""
+            local key_req_id
+            key_req_id=$(echo "$pojson" | jq -r '.ssh_key_request_id // empty')
+            echo "Key registered successfully." >&2
+            if [ -n "$key_req_id" ]; then
+                echo "Server request id: $key_req_id" >&2
+            fi
+            ;;
+        400)
+            die "signature verification failed. Please retry 'mirc ssh register'."
+            ;;
+        *)
+            die "prove-ownership failed (HTTP $pocode): $(_ssh_register_err_msg "$pojson")"
+            ;;
+    esac
+}
+
+cmd_ssh() {
+    local sub="${1:-}"
+    case "$sub" in
+        ""|--help|-h|help) ssh_help ;;
+    esac
+    shift
+    case "$sub" in
+        register) cmd_ssh_register "$@" ;;
+        *) die "unknown ssh subcommand: $sub (run 'mirc ssh --help' for the list)" ;;
+    esac
+}
+
 # ── Argument parsing ─────────────────────────────────────────────────
 
 OPT_KEY=""
@@ -1494,7 +1825,15 @@ CMD_ARGS=()
 while [ $# -gt 0 ]; do
     if [ -n "$CMD" ]; then
         case "$1" in
-            --key) OPT_KEY="${2:?'--key' requires a path}"; shift 2 ;;
+            --key)
+                # For 'ssh' subcommands, --key names the public key being
+                # registered, not the auth key. Route it to CMD_ARGS.
+                if [ "$CMD" = "ssh" ]; then
+                    CMD_ARGS+=("$1" "${2:?'--key' requires a path}"); shift 2
+                else
+                    OPT_KEY="${2:?'--key' requires a path}"; shift 2
+                fi
+                ;;
             *)     CMD_ARGS+=("$1"); shift ;;
         esac
         continue
@@ -1514,6 +1853,7 @@ case "$CMD" in
     install) cmd_install "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
     session) cmd_session "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
     volume)  cmd_volume "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
+    ssh)     cmd_ssh "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
     help)    usage ;;
     *) die "unknown command: $CMD (run 'mirc --help' for usage)" ;;
 esac
