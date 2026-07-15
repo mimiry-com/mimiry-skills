@@ -33,7 +33,19 @@ set -euo pipefail
 SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
 TOKEN_FILE="/tmp/mirc-token-$(id -u)"
 KEY_FILE="/tmp/mirc-key-$(id -u)"
-API_BASE="https://softlaunch.mimiry.com"
+# API_BASE defaults to softlaunch (mirc's canonical target) but is
+# overridable via MIMIRY_API_BASE for cross-instance testing:
+#   MIMIRY_API_BASE=https://beta.mimiry.com mirc <cmd>
+# Also flushes the cached JWT + key-path when the base changes, so a
+# stale token from a different instance can't cause silent auth errors.
+API_BASE="${MIMIRY_API_BASE:-https://softlaunch.mimiry.com}"
+if [ -n "${MIMIRY_API_BASE:-}" ]; then
+    # Non-default target — segregate token/key cache per host so switching
+    # instances doesn't leak state across.
+    _api_host="$(echo "$API_BASE" | sed 's|^https\?://||; s|/.*$||')"
+    TOKEN_FILE="/tmp/mirc-token-$(id -u)-${_api_host}"
+    KEY_FILE="/tmp/mirc-key-$(id -u)-${_api_host}"
+fi
 API="${API_BASE}/api/compute/v1"
 AUTH_API="${API_BASE}/api/auth/v1"
 TOKEN_MAX_AGE=3300  # 55 minutes
