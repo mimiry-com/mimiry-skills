@@ -1547,9 +1547,10 @@ _ssh_register_cleanup() {
     [ -n "$rid" ] || return 0
     SSH_REGISTER_PENDING_ID=""
     # Fire and forget with a short timeout; ignore errors — we're on the way out.
+    # Device-flow: the registration_id itself is the bearer (2026-07-15 amendment).
     curl -sS --max-time 2 -X DELETE \
         "${AUTH_API}/ssh-keys/register/${rid}" \
-        -H "Authorization: Bearer ${MIMIRY_TOKEN:-}" >/dev/null 2>&1 || true
+        -H "Authorization: Bearer ${rid}" >/dev/null 2>&1 || true
 }
 
 # Extract a human-readable error string from a curl response body (JSON or text).
@@ -1603,7 +1604,10 @@ cmd_ssh_register() {
     [ "$priv_key_path" != "$pub_key_path" ] || die "public key path must end in .pub: $pub_key_path"
     [ -f "$priv_key_path" ] || die "private key not found next to public key: $priv_key_path"
 
-    ensure_token
+    # Device-flow (2026-07-15 amendment): no prior authentication needed.
+    # The whole point of guided registration is to bootstrap the FIRST key
+    # for a user who has no other credential. /init is unauthenticated;
+    # subsequent calls use the returned registration_id as the bearer.
 
     # Install cleanup trap for best-effort cancel on abort.
     trap _ssh_register_cleanup EXIT INT TERM
@@ -1618,7 +1622,6 @@ cmd_ssh_register() {
     local resp
     resp=$(curl -sS -w '\n%{http_code}' -X POST \
         "${AUTH_API}/ssh-keys/register/init" \
-        -H "Authorization: Bearer $MIMIRY_TOKEN" \
         -H "Content-Type: application/json" \
         -d "$init_body")
     init_code=$(echo "$resp" | tail -1)
@@ -1626,15 +1629,6 @@ cmd_ssh_register() {
 
     case "$init_code" in
         200|201) : ;;
-        409)
-            echo "error: you already have too many pending SSH-key registrations." >&2
-            echo "Wait for the oldest to expire (~10 min TTL) or complete/cancel one, then retry." >&2
-            echo "server: $(_ssh_register_err_msg "$init_json")" >&2
-            exit 1
-            ;;
-        401|403)
-            die "not authenticated (HTTP $init_code). Run 'mirc auth --key <path>' first."
-            ;;
         *)
             die "register init failed (HTTP $init_code): $(_ssh_register_err_msg "$init_json")"
             ;;
@@ -1665,7 +1659,7 @@ EOF
         local sresp scode sjson
         sresp=$(curl -sS -w '\n%{http_code}' \
             "${AUTH_API}/ssh-keys/register/${reg_id}/status" \
-            -H "Authorization: Bearer $MIMIRY_TOKEN")
+            -H "Authorization: Bearer ${reg_id}")
         scode=$(echo "$sresp" | tail -1)
         sjson=$(echo "$sresp" | sed '$d')
 
@@ -1722,7 +1716,7 @@ EOF
     skbody=$(jq -n --arg pk "$pub_contents" '{public_key: $pk}')
     skresp=$(curl -sS -w '\n%{http_code}' -X POST \
         "${AUTH_API}/ssh-keys/register/${reg_id}/submit-key" \
-        -H "Authorization: Bearer $MIMIRY_TOKEN" \
+        -H "Authorization: Bearer ${reg_id}" \
         -H "Content-Type: application/json" \
         -d "$skbody")
     skcode=$(echo "$skresp" | tail -1)
@@ -1777,7 +1771,7 @@ EOF
     pobody=$(jq -n --arg sig "$sig_b64" '{signature: $sig}')
     poresp=$(curl -sS -w '\n%{http_code}' -X POST \
         "${AUTH_API}/ssh-keys/register/${reg_id}/prove-ownership" \
-        -H "Authorization: Bearer $MIMIRY_TOKEN" \
+        -H "Authorization: Bearer ${reg_id}" \
         -H "Content-Type: application/json" \
         -d "$pobody")
     pocode=$(echo "$poresp" | tail -1)
