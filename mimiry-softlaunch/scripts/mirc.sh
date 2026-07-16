@@ -1508,8 +1508,11 @@ Usage: mirc ssh <subcommand> [args...]
 SSH-key management via the platform's guided registration flow.
 
 Subcommands:
-  register --title NAME [--key PATH]   Register a new SSH public key.
-                                       Requires portal 2FA verification.
+  register --title NAME [--name SLUG] [--key PATH] [--yes]
+                                       Register a new SSH public key. Generates
+                                       a Mimiry-dedicated ed25519 key by default
+                                       (never overwrites). --key PATH to reuse
+                                       an existing key. Requires portal 2FA.
 
 Run `mirc ssh <subcommand> --help` for details.
 EOF
@@ -1518,34 +1521,67 @@ EOF
 
 ssh_register_help() {
     cat <<'EOF'
-Usage: mirc ssh register --title NAME [--key <public-key-path>]
+Usage: mirc ssh register --title NAME [--name SLUG] [--key <public-key-path>] [--yes]
 
 Register a new SSH public key with your account via the guided flow:
-  1. mirc calls the server to open a registration.
-  2. You open a portal URL in your browser and complete 2FA.
-  3. mirc uploads the public key and signs a server challenge to prove
+  1. mirc generates a fresh ed25519 key pair dedicated to this registration
+     (unless --key is passed).
+  2. mirc calls the server to open a registration.
+  3. You open a portal URL in your browser and complete 2FA.
+  4. mirc uploads the public key and signs a server challenge to prove
      ownership of the matching private key.
-  4. Server publishes the SSH-key-add event; registration completes.
+  5. Server publishes the SSH-key-add event; registration completes.
 
 Required:
   --title NAME         Human-readable name for the key (e.g. "MacBook Pro 2026").
 
 Optional:
-  --key PATH           Path to the SSH PUBLIC key file to register.
-                       Default: ~/.ssh/id_ed25519.pub, then ~/.ssh/id_rsa.pub.
-                       The matching private key (PATH without .pub) is used
-                       to sign the ownership challenge.
+  --name SLUG          File-name slug for the generated key pair. Defaults to
+                       a slug derived from --title (lowercase, non-alnum → _).
+                       Key files land at ~/.ssh/mimiry_<slug>[.pub].
+  --key PATH           Skip generation and register an EXISTING public key at
+                       PATH. The matching private key (PATH without .pub) is
+                       used to sign the ownership challenge. Only use this
+                       when you have a real reason to reuse — see security
+                       note below.
+  --yes                Non-interactive: if the derived key path already
+                       exists, reuse it silently instead of prompting.
+
+Security note (why generate by default):
+  Reusing a single SSH key for multiple purposes (git hosts, servers,
+  platforms) blows the blast radius on compromise: one leak revokes
+  access everywhere. Prefer one key per platform. mirc therefore
+  generates a Mimiry-dedicated key by default and never overwrites an
+  existing key file.
+
+Behaviour:
+  - Default: generates ~/.ssh/mimiry_<slug> (private) + .pub
+    with `ssh-keygen -t ed25519 -f <path> -N ""` (no passphrase — mirc
+    needs unattended access to sign challenges).
+  - If ~/.ssh/mimiry_<slug> already exists (from a prior registration)
+    mirc REFUSES to overwrite. It prompts to reuse the existing key OR
+    asks you to pass --name <different-slug>. Use --yes to reuse
+    non-interactively.
+  - If --key PATH is supplied, mirc uses that key verbatim and skips
+    generation entirely.
 
 Notes:
-  - mirc does NOT auto-generate keys. If neither default exists and --key is
-    not supplied, run: ssh-keygen -t ed25519
-  - Requires an existing authenticated mirc session (`mirc auth` first).
+  - No prior mirc authentication is required (guided flow is device-code
+    style — the browser 2FA is what proves identity).
   - If interrupted mid-flow, mirc best-effort cancels the pending
     registration on exit.
+  - The server dedups by fingerprint: registering the same public key
+    twice returns 409. Use a fresh --name for each distinct registration.
 
-Example:
+Examples:
   mirc ssh register --title "MacBook Pro 2026"
-  mirc ssh register --title "laptop-work" --key ~/.ssh/mimiry_ed25519.pub
+  # → generates ~/.ssh/mimiry_macbook_pro_2026 + .pub, registers .pub
+
+  mirc ssh register --title "CI Runner" --name ci
+  # → generates ~/.ssh/mimiry_ci + .pub
+
+  mirc ssh register --title "Legacy shared" --key ~/.ssh/id_ed25519.pub
+  # → registers an existing key file (opt-in path)
 EOF
     exit 0
 }
@@ -1581,11 +1617,13 @@ _ssh_register_err_msg() {
 cmd_ssh_register() {
     _has_help_flag "$@" && ssh_register_help
 
-    local title="" pub_key_path=""
+    local title="" pub_key_path="" name_slug="" assume_yes=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --title) title="${2:?'--title' requires a value}"; shift 2 ;;
+            --name)  name_slug="${2:?'--name' requires a value}"; shift 2 ;;
             --key)   pub_key_path="${2:?'--key' requires a path}"; shift 2 ;;
+            --yes|-y) assume_yes=1; shift ;;
             *) die "unknown option for ssh register: $1" ;;
         esac
     done
@@ -1594,14 +1632,57 @@ cmd_ssh_register() {
 
     need curl; need jq; need ssh-keygen; need base64
 
-    # Resolve public key path.
+    # Two paths:
+    #  1) --key PATH provided → use that existing key verbatim (opt-in reuse).
+    #  2) Default → generate a fresh Mimiry-dedicated key at
+    #     ~/.ssh/mimiry_<slug>. Slug from --name, else derived from --title.
+    #     Never overwrites an existing file (prompts to reuse or fails).
     if [ -z "$pub_key_path" ]; then
-        if   [ -f "$HOME/.ssh/id_ed25519.pub" ]; then pub_key_path="$HOME/.ssh/id_ed25519.pub"
-        elif [ -f "$HOME/.ssh/id_rsa.pub" ];     then pub_key_path="$HOME/.ssh/id_rsa.pub"
+        # Derive slug: lowercase, non-alnum → _, collapse repeats, trim.
+        local slug="${name_slug}"
+        if [ -z "$slug" ]; then
+            slug=$(printf '%s' "$title" \
+                | tr '[:upper:]' '[:lower:]' \
+                | sed -E 's/[^a-z0-9]+/_/g; s/^_+//; s/_+$//')
+            [ -n "$slug" ] || die "cannot derive a key-file slug from --title '$title'; pass --name <slug>"
+        fi
+
+        # Ensure ~/.ssh exists with sane perms before generating.
+        [ -d "$HOME/.ssh" ] || { mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"; }
+
+        local priv_key_path="$HOME/.ssh/mimiry_${slug}"
+        pub_key_path="${priv_key_path}.pub"
+
+        if [ -e "$priv_key_path" ] || [ -e "$pub_key_path" ]; then
+            # Existing key on the derived path. NEVER overwrite silently.
+            if [ "$assume_yes" -eq 1 ]; then
+                echo "Reusing existing key at $priv_key_path (--yes)." >&2
+            elif [ -t 0 ]; then
+                # Interactive: ask.
+                printf 'A key already exists at %s.\n' "$priv_key_path" >&2
+                printf 'Reuse it for this registration? [y/N] ' >&2
+                local answer
+                read -r answer
+                case "$answer" in
+                    y|Y|yes|YES) : ;;
+                    *) die "aborted. Pass --name <different-slug> to generate a fresh key, or --key <path> to reuse a specific existing key." ;;
+                esac
+            else
+                # Non-interactive & no --yes → refuse.
+                die "key file already exists at $priv_key_path; refusing to overwrite. Pass --yes to reuse it, --name <different-slug> to generate a fresh one, or --key <path> to point at a specific existing key."
+            fi
         else
-            die "no SSH public key found at ~/.ssh/id_ed25519.pub or ~/.ssh/id_rsa.pub. Generate one with: ssh-keygen -t ed25519"
+            # Generate a fresh ed25519 key pair. No passphrase — mirc needs
+            # to sign challenges without a prompt.
+            echo "Generating new Mimiry-dedicated SSH key at $priv_key_path..." >&2
+            if ! ssh-keygen -t ed25519 -f "$priv_key_path" -N "" -C "mirc:${slug}" >/dev/null 2>&1; then
+                die "ssh-keygen failed to create $priv_key_path"
+            fi
+            chmod 600 "$priv_key_path"
+            chmod 644 "$pub_key_path"
         fi
     fi
+
     [ -f "$pub_key_path" ] || die "public key not found: $pub_key_path"
     [ -s "$pub_key_path" ] || die "public key is empty: $pub_key_path"
 
