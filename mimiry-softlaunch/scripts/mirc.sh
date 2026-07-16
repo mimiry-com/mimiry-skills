@@ -31,23 +31,36 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
-TOKEN_FILE="/tmp/mirc-token-$(id -u)"
-KEY_FILE="/tmp/mirc-key-$(id -u)"
-# API_BASE defaults to softlaunch (mirc's canonical target) but is
-# overridable via MIMIRY_API_BASE for cross-instance testing:
-#   MIMIRY_API_BASE=https://beta.mimiry.com mirc <cmd>
-# Also flushes the cached JWT + key-path when the base changes, so a
-# stale token from a different instance can't cause silent auth errors.
-API_BASE="${MIMIRY_API_BASE:-https://softlaunch.mimiry.com}"
-if [ -n "${MIMIRY_API_BASE:-}" ]; then
-    # Non-default target — segregate token/key cache per host so switching
-    # instances doesn't leak state across.
-    _api_host="$(echo "$API_BASE" | sed 's|^https\?://||; s|/.*$||')"
-    TOKEN_FILE="/tmp/mirc-token-$(id -u)-${_api_host}"
-    KEY_FILE="/tmp/mirc-key-$(id -u)-${_api_host}"
-fi
-API="${API_BASE}/api/compute/v1"
-AUTH_API="${API_BASE}/api/auth/v1"
+# API base defaults to softlaunch (mirc's canonical target). Two ways to
+# override for cross-instance testing:
+#   1. --instance <name>          e.g.  mirc --instance beta ssh register ...
+#   2. MIMIRY_API_BASE=<full-url>  e.g.  MIMIRY_API_BASE=https://beta.mimiry.com mirc ...
+# --instance takes precedence over the env var. Token + key-path caches
+# are segregated per host so switching instances can't leak stale JWTs.
+DEFAULT_INSTANCE="softlaunch"
+_configure_api_base() {
+    local api_base
+    if [ -n "${OPT_INSTANCE:-}" ]; then
+        api_base="https://${OPT_INSTANCE}.mimiry.com"
+    elif [ -n "${MIMIRY_API_BASE:-}" ]; then
+        api_base="$MIMIRY_API_BASE"
+    else
+        api_base="https://${DEFAULT_INSTANCE}.mimiry.com"
+    fi
+    API_BASE="$api_base"
+    API="${API_BASE}/api/compute/v1"
+    AUTH_API="${API_BASE}/api/auth/v1"
+    local api_host default_host
+    api_host="$(echo "$API_BASE" | sed 's|^https\?://||; s|/.*$||')"
+    default_host="${DEFAULT_INSTANCE}.mimiry.com"
+    if [ "$api_host" = "$default_host" ]; then
+        TOKEN_FILE="/tmp/mirc-token-$(id -u)"
+        KEY_FILE="/tmp/mirc-key-$(id -u)"
+    else
+        TOKEN_FILE="/tmp/mirc-token-$(id -u)-${api_host}"
+        KEY_FILE="/tmp/mirc-key-$(id -u)-${api_host}"
+    fi
+}
 TOKEN_MAX_AGE=3300  # 55 minutes
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -85,8 +98,12 @@ Commands:
   ssh     <subcommand>   Register SSH keys via the guided 2FA flow
 
 Global options:
-  --key <path>    Path to SSH key (required on first use, remembered after)
-  --help, -h      Show this help message (works at every level)
+  --key <path>       Path to SSH key (required on first use, remembered after)
+  --instance <name>  Target a non-default instance by subdomain
+                     (e.g. --instance beta hits https://beta.mimiry.com).
+                     Overrides MIMIRY_API_BASE env var. Default: softlaunch.
+                     Token + key cache is segregated per instance.
+  --help, -h         Show this help message (works at every level)
 
 Discover more:
   mirc auth --help
@@ -1906,6 +1923,7 @@ cmd_ssh() {
 # ── Argument parsing ─────────────────────────────────────────────────
 
 OPT_KEY=""
+OPT_INSTANCE=""
 CMD=""
 CMD_ARGS=()
 
@@ -1921,19 +1939,23 @@ while [ $# -gt 0 ]; do
                     OPT_KEY="${2:?'--key' requires a path}"; shift 2
                 fi
                 ;;
-            *)     CMD_ARGS+=("$1"); shift ;;
+            --instance) OPT_INSTANCE="${2:?'--instance' requires a name (e.g. beta, softlaunch)}"; shift 2 ;;
+            *)          CMD_ARGS+=("$1"); shift ;;
         esac
         continue
     fi
     case "$1" in
         --help|-h)  usage ;;
         --key)      OPT_KEY="${2:?'--key' requires a path}"; shift 2 ;;
+        --instance) OPT_INSTANCE="${2:?'--instance' requires a name (e.g. beta, softlaunch)}"; shift 2 ;;
         -*)         die "unknown option: $1" ;;
         *)          CMD="$1"; shift ;;
     esac
 done
 
 [ -n "$CMD" ] || usage
+
+_configure_api_base
 
 case "$CMD" in
     auth)    cmd_auth "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
