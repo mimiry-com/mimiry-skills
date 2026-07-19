@@ -1819,6 +1819,49 @@ EOF
         die "timed out waiting for portal 2FA verification (5 min). Re-run 'mirc ssh register' to retry."
     fi
 
+    # RC-62 security check: fetch the verified identity from the last
+    # status response and require explicit initiator confirmation before
+    # we submit the key. Blocks the "attacker sends verify URL, victim
+    # verifies in their portal, attacker's key lands on victim's account"
+    # phishing path — the attacker would still see the victim's email
+    # here and have to press 'y' to complete, which they can't (they'd
+    # be adding a key to the wrong account, not gaining access).
+    local verified_email verified_uid
+    verified_email=$(echo "$sjson" | jq -r '.verified_user_email // empty')
+    verified_uid=$(echo "$sjson" | jq -r '.verified_user_id // empty')
+    if [ -z "$verified_email" ] || [ -z "$verified_uid" ]; then
+        die "server did not return verified user identity — refusing to submit key."
+    fi
+    cat >&2 <<EOF
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Portal verification completed for:
+    email: ${verified_email}
+    user id: ${verified_uid}
+
+This SSH key will be added to THAT account. If this
+is not you, cancel now.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+EOF
+    if [ -t 0 ]; then
+        local confirm
+        read -r -p "Add SSH key to ${verified_email}? [y/N]: " confirm
+        case "$confirm" in
+            y|Y|yes|YES) : ;;
+            *)
+                # Best-effort cancel — server will clean up on TTL too.
+                curl -sS -X DELETE \
+                    "${AUTH_API}/ssh-keys/register/${reg_id}" \
+                    -H "Authorization: Bearer ${reg_id}" >/dev/null 2>&1 || true
+                SSH_REGISTER_PENDING_ID=""
+                die "cancelled — key not added."
+                ;;
+        esac
+    else
+        die "not a TTY — refusing to auto-confirm SSH key addition. Re-run interactively."
+    fi
+
     echo "Portal 2FA verified. Submitting public key..." >&2
 
     # ── Step 3: submit-key ─────────────────────────────────────────
