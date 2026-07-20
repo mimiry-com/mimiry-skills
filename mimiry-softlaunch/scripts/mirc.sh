@@ -1782,7 +1782,21 @@ cmd_ssh_register() {
     [ -n "$verify_url" ] || die "register init returned no verify_url: $init_json"
     SSH_REGISTER_PENDING_ID="$reg_id"
 
-    cat >&2 <<EOF
+    if [ -n "$tmp_pub" ]; then
+        # RC-64 portal-initiated flow: the portal already knows about this
+        # registration via the prepare record; the actor should NOT be opening
+        # a verify URL from the terminal. All 2FA happens in the portal tab
+        # that showed the pairing code.
+        cat >&2 <<EOF
+
+Registration started (id: $reg_id) — paired with portal via tmp_pub.
+
+  Return to your portal tab and enter your 2FA code there.
+  Polling for portal verification...
+
+EOF
+    else
+        cat >&2 <<EOF
 
 Registration started (id: $reg_id)
 
@@ -1791,6 +1805,7 @@ Registration started (id: $reg_id)
   3. Return here — polling for verification...
 
 EOF
+    fi
 
     # ── Step 2: poll for portal_verified ───────────────────────────
     local max_polls=150   # 150 × 2s = 5 min
@@ -1850,20 +1865,23 @@ EOF
         die "timed out waiting for portal 2FA verification (5 min). Re-run 'mirc ssh register' to retry."
     fi
 
-    # RC-62 security check: fetch the verified identity from the last
-    # status response and require explicit initiator confirmation before
-    # we submit the key. Blocks the "attacker sends verify URL, victim
-    # verifies in their portal, attacker's key lands on victim's account"
-    # phishing path — the attacker would still see the victim's email
-    # here and have to press 'y' to complete, which they can't (they'd
-    # be adding a key to the wrong account, not gaining access).
+    # RC-62 security check (legacy actor-initiated flow only): fetch the
+    # verified identity and require explicit initiator confirmation before
+    # submitting the key. RC-64 supersedes this — when the flow started from
+    # the portal (tmp_pub set), the session-binding + intended-user check
+    # server-side already prove actor==portal-user, so the y/N confirm is
+    # redundant friction. Skip it.
     local verified_email verified_uid
     verified_email=$(echo "$sjson" | jq -r '.verified_user_email // empty')
     verified_uid=$(echo "$sjson" | jq -r '.verified_user_id // empty')
     if [ -z "$verified_email" ] || [ -z "$verified_uid" ]; then
         die "server did not return verified user identity — refusing to submit key."
     fi
-    cat >&2 <<EOF
+    if [ -n "$tmp_pub" ]; then
+        : # RC-64 portal-initiated: session-binding + intended-user checks
+          # server-side already prove actor==portal-user. No prompt needed.
+    elif [ -t 0 ]; then
+        cat >&2 <<EOF
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Portal verification completed for:
@@ -1875,7 +1893,6 @@ is not you, cancel now.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 EOF
-    if [ -t 0 ]; then
         local confirm
         read -r -p "Add SSH key to ${verified_email}? [y/N]: " confirm
         case "$confirm" in
