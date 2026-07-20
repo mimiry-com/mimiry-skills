@@ -1661,6 +1661,15 @@ cmd_ssh_register() {
 
     [ -n "$title" ] || die "ssh register requires --title <name>"
 
+    # Placeholder guard: portal shows the command with '<your key title>' as
+    # a literal placeholder. Catch the mistake early so users don't ship a
+    # key titled '<your key title>' to the server.
+    case "$title" in
+        *"<"*|*">"*)
+            die "ssh register --title must not contain '<' or '>' — replace the placeholder with your own title (e.g. --title \"MacBook Pro 2026\")"
+            ;;
+    esac
+
     need curl; need jq; need ssh-keygen; need base64
 
     # Two paths:
