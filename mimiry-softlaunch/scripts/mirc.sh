@@ -1538,7 +1538,8 @@ EOF
 
 ssh_register_help() {
     cat <<'EOF'
-Usage: mirc ssh register --title NAME [--name SLUG] [--key <public-key-path>] [--yes]
+Usage: mirc ssh register --title NAME [--name SLUG] [--key <public-key-path>]
+                        [--tmp-pub CODE] [--user EMAIL_OR_USERNAME] [--yes]
 
 Register a new SSH public key with your account via the guided flow:
   1. mirc generates a fresh ed25519 key pair dedicated to this registration
@@ -1563,6 +1564,16 @@ Optional:
                        note below.
   --yes                Non-interactive: if the derived key path already
                        exists, reuse it silently instead of prompting.
+  --tmp-pub CODE       RC-64 session-bound flow. Portal-first pairing code
+                       (format XXXX-XXXX) obtained by clicking "Add SSH key"
+                       in the portal. Server ties this mirc registration to
+                       the specific portal session that generated the code;
+                       verify will only succeed from that same session.
+                       Recommended for all interactive use.
+  --user EMAIL|SLUG    RC-64 intended-user hint. Actor's declared target
+                       account. Server checks at verify that the portal-
+                       authenticated user matches. Mismatch is terminal —
+                       actor must start over from portal /prepare.
 
 Security note (why generate by default):
   Reusing a single SSH key for multiple purposes (git hosts, servers,
@@ -1635,11 +1646,14 @@ cmd_ssh_register() {
     _has_help_flag "$@" && ssh_register_help
 
     local title="" pub_key_path="" name_slug="" assume_yes=0
+    local tmp_pub="" intended_user=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --title) title="${2:?'--title' requires a value}"; shift 2 ;;
             --name)  name_slug="${2:?'--name' requires a value}"; shift 2 ;;
             --key)   pub_key_path="${2:?'--key' requires a path}"; shift 2 ;;
+            --tmp-pub) tmp_pub="${2:?'--tmp-pub' requires a value}"; shift 2 ;;
+            --user)  intended_user="${2:?'--user' requires a value}"; shift 2 ;;
             --yes|-y) assume_yes=1; shift ;;
             *) die "unknown option for ssh register: $1" ;;
         esac
@@ -1725,9 +1739,17 @@ cmd_ssh_register() {
     # ── Step 1: init ────────────────────────────────────────────────
     local uname_s init_body init_json init_code
     uname_s=$(uname -s 2>/dev/null || echo unknown)
+    # RC-64: --tmp-pub + --user are pass-through to server. When --tmp-pub is
+    # set the server binds the registration to a portal-prepared session and
+    # requires the matching prepare_token at /verify — meaning only the
+    # portal actor who ran /prepare can complete the flow.
     init_body=$(jq -n --arg title "$title" \
                      --arg hint "mirc/0.1 (${uname_s})" \
-                     '{title: $title, client_hint: $hint}')
+                     --arg tmp_pub "$tmp_pub" \
+                     --arg intended_user "$intended_user" \
+                     '{title: $title, client_hint: $hint}
+                      + (if $tmp_pub == "" then {} else {tmp_pub: $tmp_pub} end)
+                      + (if $intended_user == "" then {} else {intended_user: $intended_user} end)')
 
     local resp
     resp=$(curl -sS -w '\n%{http_code}' -X POST \
