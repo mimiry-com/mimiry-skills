@@ -873,11 +873,18 @@ cmd_session_create() {
             session_id=$(echo "$resp" | jq -r '.id')
             echo "Session created: $session_id" >&2
             ;;
-        402)
-            echo "error: insufficient balance" >&2
-            echo "$resp" | jq . >&2
-            exit 1
-            ;;
+        # RC-98: there is deliberately NO special case for 402 here.
+        #
+        # There used to be one, and it printed the literal string
+        # "error: insufficient balance" for every 402 regardless of what the
+        # body said. The body was already correct — it carried
+        # "error": "pricing_unavailable" — so a user holding EUR 114 was told
+        # they had no credit by the CLI, not by the API.
+        #
+        # The generic branch below renders .message from the response, which is
+        # right for every case: insufficient_balance (402), gpu_unavailable
+        # (409) and pricing_unavailable (503). One rendering path, and the
+        # server decides what it says.
         *)
             echo "error (HTTP $http_code): $(echo "$resp" | jq -r '.message // .error // .')" >&2
             exit 1
@@ -1312,11 +1319,8 @@ cmd_volume_create() {
             [ -n "$vol_id" ] || die "create succeeded (HTTP $http_code) but no id in response"
             echo "Volume created: $vol_id" >&2
             ;;
-        402)
-            echo "error: insufficient balance" >&2
-            echo "$resp" | jq . >&2
-            exit 1
-            ;;
+        # RC-98: no special case for 402 — see the note in session create.
+        # The server's message is rendered by the generic branch below.
         *)
             echo "error (HTTP $http_code): $(echo "$resp" | jq -r '.message // .error // .')" >&2
             exit 1
