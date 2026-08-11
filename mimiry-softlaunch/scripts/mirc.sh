@@ -425,6 +425,9 @@ Required:
   --size-gb N             Size in GB (provider minimum applies — Verda: 100)
 
 Optional:
+  --org UUID              Organization to create the volume in. Required only
+                          when you belong to more than one — the API refuses
+                          to guess which org owns (and pays for) the volume.
   --provider PROV         Provider hint (e.g. verda)
   --location LOC          Location hint (e.g. FIN-01) — should match
                           the location of any session you plan to attach to
@@ -432,6 +435,7 @@ Optional:
 
 Examples:
   mirc volume create --name data1 --size-gb 100 --wait
+  mirc volume create --name data1 --size-gb 100 --org 06e310bb-...   # multi-org user
   mirc volume create --name demo-vol --size-gb 100 --provider verda --location FIN-03 --wait
 EOF
     exit 0
@@ -449,6 +453,11 @@ Filter options:
   --state-not CSV         Exclusion list
   --operation CSV         Primary operation inclusion (e.g. "deleting")
   --operation-not CSV     Primary operation exclusion
+  --attached true|false   Whether the volume is mounted by a session.
+                          A property, not a state — an attached volume is
+                          still state=provisioned — so this combines with
+                          --state rather than replacing it. Exactly "true"
+                          or "false"; anything else is rejected.
   --updated-after RFC3339
   --updated-before RFC3339
   --all                   Sugar for --state with every volume state — same
@@ -463,6 +472,9 @@ Pagination options:
 Examples:
   mirc volume list                       # active volumes only (default hides deleted)
   mirc volume list --all                 # active + history
+  mirc volume list --attached true       # what is in use right now
+  mirc volume list --attached false --state provisioned
+                                         # provisioned and idle — billing while unused
   mirc volume list --state deleted       # history only
   mirc volume list --all --state-not deleted   # same as the default
   mirc volume list --state provisioned,deleted
@@ -603,9 +615,26 @@ api_delete() { curl -sf -X DELETE "$API$1" -H "Authorization: Bearer $MIMIRY_TOK
 parse_list_filters() {
     local state="" state_not="" operation="" operation_not=""
     local updated_after="" updated_before=""
-    local limit="" offset=""
+    local limit="" offset="" attached=""
     while [ $# -gt 0 ]; do
         case "$1" in
+            # RC-138. Gated on LIST_FILTERS_ALLOW_ATTACHED because only the
+            # VOLUMES endpoint understands it. Accepting it for sessions would
+            # send a param that handler does not parse, so the CLI would print
+            # an unfiltered list under a filtering flag — a filter that is
+            # silently ignored returns a wrong answer shaped like a right one.
+            --attached)
+                [ "${LIST_FILTERS_ALLOW_ATTACHED:-0}" = "1" ] ||
+                    die "--attached applies to volumes, not sessions (a volume's attachment is a property; sessions have no equivalent — see RC-138)"
+                attached="${2:?'--attached' requires a value: true or false}"
+                case "$attached" in
+                    true|false) ;;
+                    # Validated here as well as server-side so the message
+                    # names the accepted spellings. "1"/"yes"/"TRUE" are all
+                    # rejected by the API too, deliberately.
+                    *) die "--attached must be exactly 'true' or 'false', got '$attached'" ;;
+                esac
+                shift 2 ;;
             --state)           state="${2:?'--state' requires a value}"; shift 2 ;;
             --state-not)       state_not="${2:?'--state-not' requires a value}"; shift 2 ;;
             --operation)       operation="${2:?'--operation' requires a value}"; shift 2 ;;
@@ -624,6 +653,7 @@ parse_list_filters() {
     [ -n "$operation_not" ]  && QS="${QS}&operation_not=$(urlencode "$operation_not")"
     [ -n "$updated_after" ]  && QS="${QS}&updated_after=$(urlencode "$updated_after")"
     [ -n "$updated_before" ] && QS="${QS}&updated_before=$(urlencode "$updated_before")"
+    [ -n "$attached" ]       && QS="${QS}&attached=$(urlencode "$attached")"
     [ -n "$limit" ]          && QS="${QS}&limit=$(urlencode "$limit")"
     [ -n "$offset" ]          && QS="${QS}&offset=$(urlencode "$offset")"
     if [ -n "$QS" ]; then QS="?${QS:1}"; fi
@@ -1282,13 +1312,20 @@ cmd_session() {
 
 cmd_volume_create() {
     _has_help_flag "$@" && volume_create_help
-    local name="" size_gb="" provider="" location="" wait_flag=false
+    local name="" size_gb="" provider="" location="" org_id="" wait_flag=false
     while [ $# -gt 0 ]; do
         case "$1" in
             --name)     name="${2:?'--name' requires a value}"; shift 2 ;;
             --size-gb)  size_gb="${2:?'--size-gb' requires a value}"; shift 2 ;;
             --provider) provider="${2:?'--provider' requires a value}"; shift 2 ;;
             --location) location="${2:?'--location' requires a value}"; shift 2 ;;
+            # RC-138. Volumes are org-scoped, and the API correctly refuses to
+            # guess when the caller belongs to more than one org:
+            #   400 You belong to 2 organizations - pass org_id explicitly
+            # The CLI had no way to comply, so `volume create` was unusable
+            # for anyone who had ever been invited to a second org. The flag
+            # is optional: a single-org user still needs nothing.
+            --org|--org-id) org_id="${2:?'--org' requires a value}"; shift 2 ;;
             --wait)     wait_flag=true; shift ;;
             *) die "unknown option for volume create: $1" ;;
         esac
@@ -1304,6 +1341,7 @@ cmd_volume_create() {
         '{name: $name, size_gb: $size_gb}')
     [ -n "$provider" ] && json=$(echo "$json" | jq --arg p "$provider" '. + {provider: $p}')
     [ -n "$location" ] && json=$(echo "$json" | jq --arg l "$location" '. + {location: $l}')
+    [ -n "$org_id" ]   && json=$(echo "$json" | jq --arg o "$org_id" '. + {org_id: $o}')
 
     local resp http_code vol_id
     resp=$(curl -s -w '\n%{http_code}' -X POST "$API/volumes" \
@@ -1411,7 +1449,10 @@ cmd_volume_list() {
             *)     args+=("$a") ;;
         esac
     done
-    parse_list_filters "${args[@]+"${args[@]}"}"
+    # RC-138: only this endpoint understands ?attached=. Scoped to the call
+    # rather than exported, so `mirc session list --attached` still dies with
+    # a message instead of silently listing everything.
+    LIST_FILTERS_ALLOW_ATTACHED=1 parse_list_filters "${args[@]+"${args[@]}"}"
     ensure_token
     api_get "/volumes${QS}" | jq .
 }
