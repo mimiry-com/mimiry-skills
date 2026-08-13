@@ -187,8 +187,10 @@ Subcommands:
   availability [opts]        Check GPU availability and pricing
   balance                    Show current credit balance
 
-State values:     submitted, provisioned, started, completed, failed,
-                  stopped, provision_failed, terminated
+State values:     submitted, provisioned, booting, boot_failed, setting_up,
+                  setup_failed, pulling_image, pull_failed, start_failed,
+                  started, completed, failed, stopped, provision_failed,
+                  terminated
 Operation values: provisioning, starting, stopping, terminating
                   (primary values; backend prefix-matches compounds)
 
@@ -960,11 +962,35 @@ cmd_session_create() {
                 operation=$(echo "$detail" | jq -r '.operation // ""')
                 ssh_host=$(echo "$detail" | jq -r '.ssh.host // empty')
                 case "$state" in
-                    failed|provision_failed)
-                        # Hard failure — VM never made it to a useful state.
+                    failed|provision_failed|pull_failed|start_failed)
+                        # Hard failure — the workload will never run.
+                        #
+                        # RC-150 Wave 3a. pull_failed and start_failed are
+                        # FATAL in the startup script: both report_error sites
+                        # are followed by `exit 1` (verda/provider.go:1251,
+                        # :1256), so nothing further will happen on that VM.
+                        # Waiting out the timeout for a container that has
+                        # already been given up on is exactly the "wrong
+                        # reason, wrong duration" this workstream removes.
                         echo "" >&2
                         echo "$detail" | jq . >&2
-                        die "session reached terminal state=$state before becoming ready"
+                        die "session reached state=$state before becoming ready"
+                        ;;
+                    boot_failed|setup_failed)
+                        # Reported, NOT fatal — and the difference is in the
+                        # script, not a judgement call. Every boot/setup
+                        # report_error site continues (a driver check that
+                        # timed out, an sshd move that did not take); the VM
+                        # may still reach a running container, degraded.
+                        # Announcing and continuing is the only honest
+                        # response to a failure the platform was told about
+                        # and the VM did not stop for.
+                        if [[ -z "${warned_degraded:-}" ]]; then
+                            warned_degraded=1
+                            echo "" >&2
+                            echo "warning: session reported state=$state (non-fatal; still waiting)" >&2
+                            echo "$detail" | jq -r '.error // empty' >&2
+                        fi
                         ;;
                     completed|terminated|stopped)
                         # Session ran AND finished while we were polling — for
@@ -1033,7 +1059,7 @@ cmd_session_list() {
     local args=()
     for a in "$@"; do
         case "$a" in
-            --all) args+=(--state "submitted,provisioned,started,completed,failed,stopped,provision_failed,terminated") ;;
+            --all) args+=(--state "submitted,provisioned,booting,boot_failed,setting_up,setup_failed,pulling_image,pull_failed,start_failed,started,completed,failed,stopped,provision_failed,terminated") ;;
             *)     args+=("$a") ;;
         esac
     done
@@ -1086,7 +1112,11 @@ cmd_session_logs() {
     # tail=2000 stays comfortably under Loki's default max_entries_limit_per_query
     # (5000) so the request never trips a 503 from the log store.
     local last_ts=""
-    local terminal_pat='^(completed|terminated|failed|provision_failed|stopped)$'
+    # pull_failed / start_failed are included because their report_error sites
+    # exit the startup script: no further container output will ever arrive, so
+    # following the log is waiting for nothing. boot_failed / setup_failed are
+    # NOT included — those sites continue, and the container may still run.
+    local terminal_pat='^(completed|terminated|failed|provision_failed|stopped|pull_failed|start_failed)$'
     while :; do
         ensure_token
 
@@ -1188,7 +1218,7 @@ cmd_session_terminate() {
         state=$(echo "$detail"     | jq -r '.state // "unknown"')
         operation=$(echo "$detail" | jq -r '.operation // ""')
         case "$state" in
-            terminated|completed|failed|stopped|provision_failed)
+            terminated|completed|failed|stopped|provision_failed|pull_failed|start_failed)
                 printf "\rstate=%-12s operation=%-30s (%ds)\n" "$state" "$operation" "$elapsed" >&2
                 return
                 ;;

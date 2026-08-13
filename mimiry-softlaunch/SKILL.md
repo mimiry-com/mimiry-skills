@@ -305,7 +305,21 @@ them — they are optional hints.
 
 Two dimensions:
 - **`state`** (durable milestone — nouns / past-tense):
-  `submitted → provisioned → started → completed/failed/stopped/provision_failed → terminated`
+  `submitted → provisioned → booting → setting_up → pulling_image → started → completed/failed/stopped → terminated`
+
+  RC-150 Wave 3a added the inside of the job to the state machine. Each in-VM
+  step is now a state rather than a transient `operation` flip, and each has a
+  failure state beside it:
+
+  | state | meaning | fatal? |
+  |---|---|---|
+  | `boot_failed` | a boot step reported an error | **no** — the script continues, degraded |
+  | `setup_failed` | a setup step reported an error | **no** — the script continues, degraded |
+  | `pull_failed` | `docker pull` failed | **yes** — the script exits |
+  | `start_failed` | `docker run` failed | **yes** — the script exits |
+
+  None of the four is terminal: the VM is alive, still billing, and still
+  terminable. Fatal only means the workload will never run.
 - **`operation`** (current activity — present-continuous, may be empty when
   resting). Format is bare `<primary>` or compound `<primary>__<sub_step>`:
   - `provisioning` — during `state=submitted`
@@ -326,7 +340,7 @@ POST /sessions → state:submitted → state:provisioned                        
                                                      ↓
                                               state:stopped → state:terminated
 
-On error at any stage → state:failed or state:provision_failed
+On error at any stage → state:failed, state:provision_failed, or one of the four in-VM failure states above
 ```
 
 `updated_at` is bumped only on durable state transitions. Sub-operation flips
@@ -336,7 +350,7 @@ do NOT move the session into `?updated_after=NOW-5s` results.
 Poll every 5 seconds until `started` (agent-internal, not user-facing).
 The entire loop MUST be in a single `bash -c` call:
 ```bash
-bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && while true; do RESP=$(curl -s "${MIMIRY_API}/sessions/$SESSION_ID" -H "Authorization: Bearer $MIMIRY_TOKEN"); STATE=$(echo "$RESP" | jq -r .state); OP=$(echo "$RESP" | jq -r ".operation // \"\""); echo "State: $STATE | Operation: $OP"; case "$STATE" in started) break ;; failed|provision_failed) echo "FAILED: $(echo $RESP | jq -r .error)"; break ;; completed|terminated|stopped) echo "Session ended unexpectedly"; break ;; esac; sleep 5; done'
+bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && while true; do RESP=$(curl -s "${MIMIRY_API}/sessions/$SESSION_ID" -H "Authorization: Bearer $MIMIRY_TOKEN"); STATE=$(echo "$RESP" | jq -r .state); OP=$(echo "$RESP" | jq -r ".operation // \"\""); echo "State: $STATE | Operation: $OP"; case "$STATE" in started) break ;; failed|provision_failed|pull_failed|start_failed) echo "FAILED: $(echo $RESP | jq -r .error)"; break ;; completed|terminated|stopped) echo "Session ended unexpectedly"; break ;; esac; sleep 5; done'
 ```
 
 Once running, extract SSH details from `$RESP` (still in the same shell)
