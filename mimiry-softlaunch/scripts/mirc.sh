@@ -115,7 +115,7 @@ Discover more:
 Quick examples:
   mirc install                                       # symlink to ~/.local/bin/mirc
   mirc auth --key ~/.ssh/mimiry
-  mirc session list --state started
+  mirc session list --state running
   mirc volume create --name data1 --size-gb 100 --wait
   mirc session availability --cheapest --provider verda --json
 
@@ -189,7 +189,7 @@ Subcommands:
 
 State values:     submitted, provisioned, booting, boot_failed, setting_up,
                   setup_failed, pulling_image, pull_failed, start_failed,
-                  started, idle, completed, failed, stopped, provision_failed,
+                  running, idle, exited, terminating, provision_failed,
                   terminated
 
   idle            The workload is over and the VM was deliberately KEPT
@@ -241,7 +241,7 @@ Optional:
   --max-attempts N        Retry cap on provider capacity errors (default 3)
   --max-price EUR         Reject candidates above this hourly rate (EUR,
                           post-margin — same number availability shows)
-  --wait                  Block until state=started and SSH is ready
+  --wait                  Block until state=running and SSH is ready
 
 GPU naming:
   Mimiry canonical names follow the pattern {Family}_{Vram}G_{FormFactor}.
@@ -278,7 +278,7 @@ List sessions (paginated, sorted newest-first). Default filter excludes
 no states — pass an explicit --state or --state-not if you want to narrow.
 
 Filter options:
-  --state CSV             Inclusion list, e.g. "started,provisioned"
+  --state CSV             Inclusion list, e.g. "running,provisioned"
   --state-not CSV         Exclusion list
   --operation CSV         Primary operation inclusion (e.g. "starting,stopping")
   --operation-not CSV     Primary operation exclusion
@@ -294,8 +294,8 @@ Pagination options:
 
 Examples:
   mirc session list
-  mirc session list --state started
-  mirc session list --state-not terminated,completed --updated-after 2026-05-01T00:00:00Z
+  mirc session list --state running
+  mirc session list --state-not terminated,exited --updated-after 2026-05-01T00:00:00Z
   mirc session list --operation starting
   mirc session list --all
 EOF
@@ -939,10 +939,10 @@ cmd_session_create() {
         return
     fi
 
-    # --wait: poll until state=started AND ssh.host populated, or fail on
+    # --wait: poll until state=running AND ssh.host populated, or fail on
     # terminal/error states. Refresh the token periodically since boot can
     # exceed the JWT lifetime.
-    echo "Waiting for session to reach state=started + SSH ready ..." >&2
+    echo "Waiting for session to reach state=running + SSH ready ..." >&2
     local start_ts now elapsed state operation ssh_host
     local first_404_elapsed=-1 ever_seen_200=false
     start_ts=$(date +%s)
@@ -997,7 +997,7 @@ cmd_session_create() {
                             echo "$detail" | jq -r '.error // empty' >&2
                         fi
                         ;;
-                    completed|terminated|stopped)
+                    exited|terminated|terminating)
                         # Session ran AND finished while we were polling — for
                         # auto_terminate=on_complete with a short --command,
                         # the container can exit between two of our poll cycles.
@@ -1014,7 +1014,7 @@ cmd_session_create() {
                         echo "$detail" | jq . >&2
                         die "session reached terminal state=$state with exit_code=$exit_code"
                         ;;
-                    started)
+                    running)
                         if [ -n "$ssh_host" ]; then
                             printf "\rstate=%-12s operation=%-30s (%ds) — ready\n" "$state" "$operation" "$elapsed" >&2
                             echo "$detail" | jq .
@@ -1064,7 +1064,7 @@ cmd_session_list() {
     local args=()
     for a in "$@"; do
         case "$a" in
-            --all) args+=(--state "submitted,provisioned,booting,boot_failed,setting_up,setup_failed,pulling_image,pull_failed,start_failed,started,idle,completed,failed,stopped,provision_failed,terminated") ;;
+            --all) args+=(--state "submitted,provisioned,booting,boot_failed,setting_up,setup_failed,pulling_image,pull_failed,start_failed,running,idle,exited,terminating,provision_failed,terminated") ;;
             *)     args+=("$a") ;;
         esac
     done
@@ -1121,7 +1121,7 @@ cmd_session_logs() {
     # exit the startup script: no further container output will ever arrive, so
     # following the log is waiting for nothing. boot_failed / setup_failed are
     # NOT included — those sites continue, and the container may still run.
-    local terminal_pat='^(completed|terminated|failed|provision_failed|stopped|pull_failed|start_failed)$'
+    local terminal_pat='^(exited|terminated|terminating|provision_failed|pull_failed|start_failed|completed|failed|stopped)$'
     while :; do
         ensure_token
 
@@ -1223,7 +1223,7 @@ cmd_session_terminate() {
         state=$(echo "$detail"     | jq -r '.state // "unknown"')
         operation=$(echo "$detail" | jq -r '.operation // ""')
         case "$state" in
-            terminated|completed|failed|stopped|provision_failed|pull_failed|start_failed)
+            terminated|exited|terminating|provision_failed|pull_failed|start_failed|completed|failed|stopped)
                 printf "\rstate=%-12s operation=%-30s (%ds)\n" "$state" "$operation" "$elapsed" >&2
                 return
                 ;;

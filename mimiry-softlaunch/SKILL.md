@@ -176,8 +176,8 @@ bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MI
 ```
 
 Optional filter query params (all comma-separated where lists apply):
-- `state=started,provisioned` — durable state inclusion
-- `state_not=terminated,completed` — durable state exclusion
+- `state=running,provisioned` — durable state inclusion
+- `state_not=terminated,exited` — durable state exclusion
 - `operation=starting,stopping` — primary operation inclusion (matches all
   `<primary>__*` compounds, e.g. `operation=starting` matches
   `starting__pulling_image`)
@@ -191,7 +191,7 @@ Optional filter query params (all comma-separated where lists apply):
 bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/sessions/$SESSION_ID" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .'
 ```
 
-**Get logs** (session must have `state=started`):
+**Get logs** (session must have `state=running`):
 ```bash
 bash -c 'source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path> && curl -s "${MIMIRY_API}/sessions/$SESSION_ID/logs?tail=50" -H "Authorization: Bearer $MIMIRY_TOKEN" | jq -r .logs'
 ```
@@ -305,7 +305,7 @@ them — they are optional hints.
 
 Two dimensions:
 - **`state`** (durable milestone — nouns / past-tense):
-  `submitted → provisioned → booting → setting_up → pulling_image → started → completed/failed/stopped → terminated`
+  `submitted → provisioned → booting → setting_up → pulling_image → running → exited → idle | terminating → terminated`
 
   RC-150 Wave 3a added the inside of the job to the state machine. Each in-VM
   step is now a state rather than a transient `operation` flip, and each has a
@@ -323,9 +323,9 @@ Two dimensions:
 - **`operation`** (current activity — present-continuous, may be empty when
   resting). Format is bare `<primary>` or compound `<primary>__<sub_step>`:
   - `provisioning` — during `state=submitted`
-  - `starting__setting_up`, `starting__pulling_image`, `starting__starting_container` — during `state=provisioned`, transitioning to `started`
-  - `""` (empty) — at `state=started`, container is up and running (resting)
-  - `stopping__stopping_container` — transitioning from `started` to `stopped`
+  - `starting__setting_up`, `starting__pulling_image`, `starting__starting_container` — during `state=provisioned`, transitioning to `running`
+  - `""` (empty) — at `state=running`, container is up (resting)
+  - `stopping__stopping_container` — transitioning from `running` to `terminating`
   - `terminating` — transitioning toward `terminated`
 
 > **Filters accept primaries only.** `?operation=starting` matches all three
@@ -333,7 +333,7 @@ Two dimensions:
 > contains; the primary is what the filter accepts.
 
 ```
-POST /sessions → state:submitted → state:provisioned                                                                                  → state:started → state:completed
+POST /sessions → state:submitted → state:provisioned                                                                                  → state:running → state:exited
                  operation:provisioning  operation:starting__setting_up  operation:starting__pulling_image  operation:starting__starting_container  operation:""    ↓
                                                                                                                                                             state:terminated
                                               DELETE /sessions/{id}
