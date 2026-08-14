@@ -189,8 +189,13 @@ Subcommands:
 
 State values:     submitted, provisioned, booting, boot_failed, setting_up,
                   setup_failed, pulling_image, pull_failed, start_failed,
-                  started, completed, failed, stopped, provision_failed,
+                  started, idle, completed, failed, stopped, provision_failed,
                   terminated
+
+  idle            The workload is over and the VM was deliberately KEPT
+                  (auto-terminate never, or on_success after a failure).
+                  It is still running and still billing — terminate it when
+                  you are done.
 Operation values: provisioning, starting, stopping, terminating
                   (primary values; backend prefix-matches compounds)
 
@@ -1059,7 +1064,7 @@ cmd_session_list() {
     local args=()
     for a in "$@"; do
         case "$a" in
-            --all) args+=(--state "submitted,provisioned,booting,boot_failed,setting_up,setup_failed,pulling_image,pull_failed,start_failed,started,completed,failed,stopped,provision_failed,terminated") ;;
+            --all) args+=(--state "submitted,provisioned,booting,boot_failed,setting_up,setup_failed,pulling_image,pull_failed,start_failed,started,idle,completed,failed,stopped,provision_failed,terminated") ;;
             *)     args+=("$a") ;;
         esac
     done
