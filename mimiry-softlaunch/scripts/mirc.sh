@@ -37,7 +37,11 @@ SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
 #   2. MIMIRY_API_BASE=<full-url>  e.g.  MIMIRY_API_BASE=https://beta.mimiry.com mirc ...
 # --instance takes precedence over the env var. Token + key-path caches
 # are segregated per host so switching instances can't leak stale JWTs.
-DEFAULT_INSTANCE="softlaunch"
+# beta is the only live instance (Convention 4b). This said "softlaunch" until
+# 2026-08-16 — a year after that instance was decommissioned (2026-07-25) — so
+# every bare `mirc` command resolved to a host that no longer answers, and the
+# only symptom was a jq parse error from the HTML the edge returned.
+DEFAULT_INSTANCE="beta"
 _configure_api_base() {
     local api_base
     if [ -n "${OPT_INSTANCE:-}" ]; then
@@ -50,15 +54,39 @@ _configure_api_base() {
     API_BASE="$api_base"
     API="${API_BASE}/api/compute/v1"
     AUTH_API="${API_BASE}/api/auth/v1"
-    local api_host default_host
-    api_host="$(echo "$API_BASE" | sed 's|^https\?://||; s|/.*$||')"
-    default_host="${DEFAULT_INSTANCE}.mimiry.com"
-    if [ "$api_host" = "$default_host" ]; then
-        TOKEN_FILE="/tmp/mirc-token-$(id -u)"
-        KEY_FILE="/tmp/mirc-key-$(id -u)"
-    else
-        TOKEN_FILE="/tmp/mirc-token-$(id -u)-${api_host}"
-        KEY_FILE="/tmp/mirc-key-$(id -u)-${api_host}"
+    API_HOST="$(echo "$API_BASE" | sed 's|^https\?://||; s|/.*$||')"
+    # ALWAYS suffixed by host. The default host used to get an unsuffixed file,
+    # which meant the name of the cache did not say which instance the token was
+    # for — so changing DEFAULT_INSTANCE silently repurposed an existing token
+    # for a different host. A cache whose key omits the thing that varies is a
+    # cache that can answer the wrong question.
+    TOKEN_FILE="/tmp/mirc-token-$(id -u)-${API_HOST}"
+    KEY_FILE="/tmp/mirc-key-$(id -u)-${API_HOST}"
+}
+
+# _require_json fails with a diagnosis when a response is not JSON.
+#
+# Convention 37, applied to this tool. Every JSON-consuming path used to pipe
+# the response straight into jq, so an unreachable host, a Cloudflare error
+# page, a 502 or an empty body all surfaced as:
+#
+#   jq: parse error: Invalid numeric literal at line 1, column 6
+#
+# — which names neither the host, nor the status, nor the fact that the request
+# failed at all. That is precisely "a failure that looks like a result".
+#
+#   _require_json "<what>" "<body>" ["<http-status>"]
+_require_json() {
+    local what="$1" body="$2" status="${3:-}"
+    if [ -z "$body" ]; then
+        die "$what: empty response from ${API_HOST}${status:+ (HTTP $status)} — the host answered nothing"
+    fi
+    if ! printf '%s' "$body" | jq -e . >/dev/null 2>&1; then
+        local excerpt
+        excerpt=$(printf '%s' "$body" | tr -d '\r' | tr '\n' ' ' | cut -c1-160)
+        die "$what: ${API_HOST} did not return JSON${status:+ (HTTP $status)}.
+  response: ${excerpt}
+  If this host is wrong, pick another with --instance <name> (default: ${DEFAULT_INSTANCE})."
     fi
 }
 TOKEN_MAX_AGE=3300  # 55 minutes
@@ -595,16 +623,21 @@ ensure_token() {
     signature=$(base64 -w0 "${tmpfile}.sig")
     rm -f "$tmpfile" "${tmpfile}.sig"
 
-    response=$(curl -s -X POST "${API_BASE}/api/v1/auth/token" \
+    local http_status
+    response=$(curl -sS -w '\n%{http_code}' -X POST "${API_BASE}/api/v1/auth/token" \
         -H "X-SSH-Fingerprint: $fingerprint" \
         -H "X-SSH-Signature: $signature" \
         -H "X-SSH-Timestamp: $timestamp" \
         -H "X-SSH-Nonce: $nonce" \
         -H "Content-Type: application/json" \
-        -d '{"expires_in": 3600}')
+        -d '{"expires_in": 3600}') || die "authentication: could not reach ${API_HOST}"
+    http_status="${response##*$'\n'}"
+    response="${response%$'\n'*}"
+
+    _require_json "authentication" "$response" "$http_status"
 
     token=$(echo "$response" | jq -r '.access_token // empty')
-    [ -n "$token" ] || die "authentication failed: $(echo "$response" | jq -r '.message // .error // "unknown error"')"
+    [ -n "$token" ] || die "authentication failed (HTTP $http_status): $(echo "$response" | jq -r '.message // .error // "unknown error"')"
 
     MIMIRY_TOKEN="$token"
     echo "$timestamp" > "$TOKEN_FILE"
@@ -613,8 +646,34 @@ ensure_token() {
     echo "Authenticated (fingerprint: $fingerprint)" >&2
 }
 
-api_get()    { curl -sf "$API$1" -H "Authorization: Bearer $MIMIRY_TOKEN"; }
-api_delete() { curl -sf -X DELETE "$API$1" -H "Authorization: Bearer $MIMIRY_TOKEN"; }
+# api_get / api_delete print a JSON body or fail with a diagnosis.
+#
+# These used `curl -sf`, which DISCARDS the body on any 4xx/5xx and exits 22 —
+# so an expired token, a 404 or a 502 all reached the caller as an empty string
+# that jq then choked on. The status and the server's own explanation, the two
+# things that say what to do next, were the parts thrown away.
+_api_request() {
+    local method="$1" path="$2" body status
+    body=$(curl -sS -w '\n%{http_code}' -X "$method" "$API$path" \
+        -H "Authorization: Bearer $MIMIRY_TOKEN") \
+        || die "$method $path: could not reach ${API_HOST}"
+    status="${body##*$'\n'}"
+    body="${body%$'\n'*}"
+
+    if [ "$status" -ge 400 ] 2>/dev/null; then
+        local detail=""
+        if printf '%s' "$body" | jq -e . >/dev/null 2>&1; then
+            detail=$(printf '%s' "$body" | jq -r '.message // .error // empty')
+        fi
+        [ -n "$detail" ] || detail=$(printf '%s' "$body" | tr '\n' ' ' | cut -c1-160)
+        die "$method $path failed (HTTP $status): ${detail:-no response body}"
+    fi
+
+    _require_json "$method $path" "$body" "$status"
+    printf '%s' "$body"
+}
+api_get()    { _api_request GET "$1"; }
+api_delete() { _api_request DELETE "$1"; }
 
 # Build a query string from list filter + pagination flags. Sets QS.
 # All `list` commands route through this so the flag set stays uniform —
