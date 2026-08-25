@@ -14,9 +14,24 @@ description: >
 
 # Mimiry Softlaunch — GPU Compute (Early Beta)
 
-> **Softlaunch notice:** This skill targets the Mimiry softlaunch environment
-> (`softlaunch.mimiry.com`). It is an early beta — APIs, pricing, and features
-> may change without notice. Report issues to the Mimiry team.
+> **Softlaunch notice:** This skill targets Mimiry's current early-access
+> environment. It is an early beta — APIs, pricing, and features may change
+> without notice. Report issues to the Mimiry team.
+
+> 🚨 **Never hard-code the API host. Resolve it.**
+>
+> ```bash
+> bash -c 'SKILL_DIR/scripts/mirc.sh api-base'
+> ```
+>
+> The host this skill talks to has changed twice, and both times a hard-coded
+> value kept pointing at a hostname with **no DNS record** — once for a year.
+> This document named `softlaunch.mimiry.com` in nine places long after that
+> instance was decommissioned (2026-07-25).
+>
+> The host is also **not** derivable from an instance name: since 2026-08-23
+> subdomains are role-named and permanent while the instance behind one
+> changes. `mirc api-base` is the single place that knows the answer.
 
 ## Locating Skill Scripts
 
@@ -61,8 +76,8 @@ normalizes automatically.
    ```
 2. **Register it on Mimiry** — the user must add the public key
    (`~/.ssh/mimiry.pub`) through the Mimiry portal. There is currently no
-   API for key registration. Direct them to:
-   `https://softlaunch.mimiry.com` → Profile → SSH Keys → Add Key
+   API for key registration. Direct them to the portal — get its URL with
+   `SKILL_DIR/scripts/mirc.sh api-base`, then → Profile → SSH Keys → Add Key
 3. Once the key is registered, proceed with the key path they chose.
 
 The same SSH key serves two purposes: authenticating with the API (signature
@@ -91,7 +106,7 @@ source SKILL_DIR/scripts/mimiry-auth.sh <ssh_key_path>
 
 Tokens expire after 1 hour — re-authenticate if you get 401s.
 
-**API base:** `https://softlaunch.mimiry.com`
+**API base:** resolve with `SKILL_DIR/scripts/mirc.sh api-base` — never assume it.
 **Compute prefix:** `/api/compute/v1`
 
 > **CRITICAL — All commands MUST be wrapped in `bash -c`.**
@@ -115,7 +130,7 @@ Every API call must be wrapped in `bash -c` with `source` included.
 
 **Check GPU availability** (public — no auth required):
 ```bash
-bash -c 'curl -s "https://softlaunch.mimiry.com/api/compute/v1/availability" | jq .'
+bash -c 'B=$(SKILL_DIR/scripts/mirc.sh api-base); curl -s "$B/api/compute/v1/availability" | jq .'
 ```
 Returns all available GPU models with per-provider pricing and locations.
 Each model includes a `providers` array showing which providers offer it
@@ -159,7 +174,7 @@ Optional query params: `provider=verda`, `gpu_family=H100,T4`,
 to entries where the `providers` array contains the target provider, then
 sort by that provider's `hourly_rate`. Example using jq:
 ```bash
-bash -c 'curl -s "https://softlaunch.mimiry.com/api/compute/v1/availability" | jq --arg p "verda" '"'"'[.gpu_models[] | select(.available) | {name, hourly_rate: ([.providers[] | select(.provider == $p) | .hourly_rate] | first)} | select(.hourly_rate)] | sort_by(.hourly_rate) | first'"'"''
+bash -c 'B=$(SKILL_DIR/scripts/mirc.sh api-base); curl -s "$B/api/compute/v1/availability" | jq --arg p "verda" '"'"'[.gpu_models[] | select(.available) | {name, hourly_rate: ([.providers[] | select(.provider == $p) | .hourly_rate] | first)} | select(.hourly_rate)] | sort_by(.hourly_rate) | first'"'"''
 ```
 This returns the cheapest available GPU offered by the given provider
 (name + rate). Use that `name` as `gpu.types[0]` and the provider as
@@ -429,22 +444,28 @@ command so the variables are defined:
 source SKILL_DIR/scripts/mimiry-auth.sh <key_path>
 
 # Check status:
-curl -s "https://softlaunch.mimiry.com/api/compute/v1/sessions/<session_id>" \
+curl -s "<API_BASE>/api/compute/v1/sessions/<session_id>" \
   -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .
 
 # Get logs:
-curl -s "https://softlaunch.mimiry.com/api/compute/v1/sessions/<session_id>/logs?tail=50" \
+curl -s "<API_BASE>/api/compute/v1/sessions/<session_id>/logs?tail=50" \
   -H "Authorization: Bearer $MIMIRY_TOKEN" | jq -r '.logs'
 
 # Terminate:
-curl -s -X DELETE "https://softlaunch.mimiry.com/api/compute/v1/sessions/<session_id>" \
+curl -s -X DELETE "<API_BASE>/api/compute/v1/sessions/<session_id>" \
   -H "Authorization: Bearer $MIMIRY_TOKEN" | jq .
 ```
 
-Note: in raw commands, always use the fully resolved URL
-(`https://softlaunch.mimiry.com/api/compute/v1/...`), never `${MIMIRY_API}`.
-The only variable that's acceptable is `$MIMIRY_TOKEN` because the `source`
-command on the line above defines it.
+Note: in raw commands, always use the fully resolved URL, never `${MIMIRY_API}`
+— the user pastes these into their own terminal, where that variable does not
+exist. The only variable that's acceptable is `$MIMIRY_TOKEN`, because the
+`source` line directly above defines it.
+
+**`<API_BASE>` above is a placeholder you must substitute**, not text to print.
+Resolve it ONCE with `SKILL_DIR/scripts/mirc.sh api-base` and paste the literal
+result into the commands you show the user. Do not hard-code a host from memory:
+this file named `softlaunch.mimiry.com` for a year after that instance was
+decommissioned, so every command it printed was already broken.
 
 ### Token Expiry Guidance
 

@@ -31,17 +31,62 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
-# API base defaults to softlaunch (mirc's canonical target). Two ways to
-# override for cross-instance testing:
-#   1. --instance <name>          e.g.  mirc --instance beta ssh register ...
-#   2. MIMIRY_API_BASE=<full-url>  e.g.  MIMIRY_API_BASE=https://beta.mimiry.com mirc ...
-# --instance takes precedence over the env var. Token + key-path caches
-# are segregated per host so switching instances can't leak stale JWTs.
-# beta is the only live instance (Convention 4b). This said "softlaunch" until
-# 2026-08-16 — a year after that instance was decommissioned (2026-07-25) — so
-# every bare `mirc` command resolved to a host that no longer answers, and the
-# only symptom was a jq parse error from the HTML the edge returned.
-DEFAULT_INSTANCE="beta"
+# ── Which host does a bare `mirc` talk to? ───────────────────────────
+#
+# 🚨 THE VALUES BELOW ARE SUBDOMAINS, NOT DEPLOYMENT INSTANCE NAMES.
+#
+# They stopped being the same thing on 2026-08-23 (decision D1): subdomains are
+# ROLE-NAMED AND PERMANENT, while the instance behind a given subdomain changes
+# over time. Today the instance behind `trunk` is still called `beta`, and
+# `beta.mimiry.com` does not exist at all.
+#
+# Deriving a host from an instance name has now broken this script TWICE:
+#
+#   1. The default said "softlaunch" for a year after that instance was
+#      decommissioned (2026-07-25). Fixed 2026-08-16 by changing the NAME.
+#   2. The name was changed to "beta" — and D1 then moved the live environment
+#      to trunk.mimiry.com and DELETED the beta DNS record, so every bare
+#      `mirc` broke again, by the same mechanism, within a week.
+#
+# Both times the fix was a new name and the coupling survived. So these are
+# looked up, not derived, and they are named for what they are.
+#
+# DEV_SUBDOMAIN  — used when mirc runs FROM THE REPO. Rolling development host;
+#                  per D1 trunk keeps this hostname permanently.
+# LIVE_SUBDOMAIN — used when mirc runs from an INSTALLED SKILL copy. The
+#                  released host end users are given.
+#
+# 🚨 LIVE_SUBDOMAIN is set to the NEXT live instance, which is not live yet.
+# There is no released instance today (only trunk). Until alpha is up, an
+# installed skill copy will fail — LOUDLY and by name, see _preflight_host.
+DEV_SUBDOMAIN="trunk"
+LIVE_SUBDOMAIN="alpha"
+
+# _default_subdomain picks between them by asking whether this file is running
+# out of a checkout of the `skills` repo.
+#
+# The marker is that repo's own .git, which sits EXACTLY TWO levels above this
+# script (skills/.git vs skills/mimiry-softlaunch/scripts/mirc.sh). That
+# placement is what makes it a reliable signal: it is OUTSIDE the skill
+# directory, so installing the skill cannot copy it. A marker file placed
+# inside the skill would be copied along with everything else and would report
+# "repo" on every user's machine.
+#
+# Checking exactly two levels up also means a user whose ~/.claude happens to be
+# a git repo is not misread as a developer — that .git is three levels up.
+_default_subdomain() {
+    if [ -d "$(dirname "$(dirname "$SCRIPT_DIR")")/.git" ]; then
+        echo "$DEV_SUBDOMAIN"
+    else
+        echo "$LIVE_SUBDOMAIN"
+    fi
+}
+
+# Overrides, highest precedence first:
+#   1. --instance <subdomain>       e.g.  mirc --instance trunk ssh register ...
+#   2. MIMIRY_API_BASE=<full-url>   e.g.  MIMIRY_API_BASE=https://trunk.mimiry.com mirc ...
+# Token + key-path caches are segregated per host so switching hosts can't leak
+# stale JWTs.
 _configure_api_base() {
     local api_base
     if [ -n "${OPT_INSTANCE:-}" ]; then
@@ -49,17 +94,17 @@ _configure_api_base() {
     elif [ -n "${MIMIRY_API_BASE:-}" ]; then
         api_base="$MIMIRY_API_BASE"
     else
-        api_base="https://${DEFAULT_INSTANCE}.mimiry.com"
+        api_base="https://$(_default_subdomain).mimiry.com"
     fi
     API_BASE="$api_base"
     API="${API_BASE}/api/compute/v1"
     AUTH_API="${API_BASE}/api/auth/v1"
     API_HOST="$(echo "$API_BASE" | sed 's|^https\?://||; s|/.*$||')"
     # ALWAYS suffixed by host. The default host used to get an unsuffixed file,
-    # which meant the name of the cache did not say which instance the token was
-    # for — so changing DEFAULT_INSTANCE silently repurposed an existing token
-    # for a different host. A cache whose key omits the thing that varies is a
-    # cache that can answer the wrong question.
+    # which meant the name of the cache did not say which host the token was
+    # for — so changing the default subdomain silently repurposed an existing
+    # token for a different host. A cache whose key omits the thing that varies
+    # is a cache that can answer the wrong question.
     TOKEN_FILE="/tmp/mirc-token-$(id -u)-${API_HOST}"
     KEY_FILE="/tmp/mirc-key-$(id -u)-${API_HOST}"
 }
@@ -86,8 +131,55 @@ _require_json() {
         excerpt=$(printf '%s' "$body" | tr -d '\r' | tr '\n' ' ' | cut -c1-160)
         die "$what: ${API_HOST} did not return JSON${status:+ (HTTP $status)}.
   response: ${excerpt}
-  If this host is wrong, pick another with --instance <name> (default: ${DEFAULT_INSTANCE})."
+  If this host is wrong, pick another with --instance <subdomain>
+  (this run defaulted to $(_default_subdomain).mimiry.com)."
     fi
+}
+
+# _preflight_host fails by NAME when the target host does not exist in DNS.
+#
+# Convention 37: "the host does not resolve" and "the host answered nothing" are
+# different answers, and only one of them is about the network. Without this,
+# a non-existent host reaches _require_json as an empty body and is reported as
+# "the host answered nothing" — which reads like an outage at a host that is in
+# fact fine, because it is not there at all.
+#
+# This is not hypothetical maintenance. LIVE_SUBDOMAIN is deliberately set to an
+# instance that is NOT UP YET, so this is the exact path every installed skill
+# copy takes today. It is the difference between a user reading
+#
+#   error: mimiry: alpha.mimiry.com does not resolve — the alpha instance is
+#          not live yet. Use --instance trunk, or MIMIRY_API_BASE=<url>.
+#
+# and the two previous incidents, whose only symptom was a jq parse error.
+_PREFLIGHT_DONE=""
+_preflight_host() {
+    # Called from the request helpers rather than at startup, so `mirc help`
+    # and the per-command help paths never wait on a resolver. Memoised so a
+    # command making several calls looks up once.
+    [ -n "$_PREFLIGHT_DONE" ] && return 0
+    _PREFLIGHT_DONE=1
+    # Only meaningful for name lookups; an explicit MIMIRY_API_BASE may point at
+    # an IP, a port, or localhost, and second-guessing that is not our business.
+    case "$API_HOST" in
+        *.*) ;;
+        *) return 0 ;;
+    esac
+    if command -v getent >/dev/null 2>&1; then
+        getent hosts "$API_HOST" >/dev/null 2>&1 && return 0
+    elif command -v host >/dev/null 2>&1; then
+        host "$API_HOST" >/dev/null 2>&1 && return 0
+    else
+        return 0   # no resolver tool — say nothing rather than guess
+    fi
+
+    local hint="  Pick a host with --instance <subdomain>, or set MIMIRY_API_BASE=<full-url>."
+    if [ -z "${OPT_INSTANCE:-}${MIMIRY_API_BASE:-}" ] && [ "$API_HOST" = "${LIVE_SUBDOMAIN}.mimiry.com" ]; then
+        hint="  The '${LIVE_SUBDOMAIN}' instance is not live yet — there is no released instance today.
+  Use '--instance ${DEV_SUBDOMAIN}' to reach the rolling development host."
+    fi
+    die "${API_HOST} does not resolve (no DNS record), so no request was attempted.
+${hint}"
 }
 TOKEN_MAX_AGE=3300  # 55 minutes
 
@@ -120,6 +212,7 @@ sessions and persistent block volumes, query GPU availability.
 
 Commands:
   auth                   Authenticate and print token info
+  api-base               Print the API base URL this invocation resolves to
   install                Symlink mirc into a user-space PATH directory
   session <subcommand>   Compute session operations
   volume  <subcommand>   Block volume operations
@@ -127,10 +220,11 @@ Commands:
 
 Global options:
   --key <path>       Path to SSH key (required on first use, remembered after)
-  --instance <name>  Target a non-default instance by subdomain
-                     (e.g. --instance beta hits https://beta.mimiry.com).
-                     Overrides MIMIRY_API_BASE env var. Default: softlaunch.
-                     Token + key cache is segregated per instance.
+  --instance <sub>   Target a host by SUBDOMAIN, e.g.
+                       --instance trunk  ->  https://trunk.mimiry.com
+                     A subdomain is NOT a deployment instance name; they have
+                     been separate since 2026-08-23. Overrides MIMIRY_API_BASE.
+                     Token + key cache is segregated per host.
   --help, -h         Show this help message (works at every level)
 
 Discover more:
@@ -159,6 +253,21 @@ Demo — cheapest GPU + persistent volume + interactive session:
       --command 'nvidia-smi | tee /data/nvidia-smi-log; sleep infinity' \
       --wait
 EOF
+    # Printed OUTSIDE the quoted heredoc, from the same function that resolves
+    # it, so it cannot drift. The static text used to read "Default: softlaunch"
+    # and was still saying it after the default had been changed to `beta` —
+    # help that restates a value is help that eventually lies.
+    local sub; sub="$(_default_subdomain)"
+    printf '\nCurrent default host: https://%s.mimiry.com' "$sub"
+    if [ "$sub" = "$DEV_SUBDOMAIN" ]; then
+        printf '   (running from the repo checkout)\n'
+    else
+        printf '   (installed skill copy)\n'
+        if ! getent hosts "${sub}.mimiry.com" >/dev/null 2>&1; then
+            printf "  ⚠ %s.mimiry.com does not resolve — that instance is not live yet.\n" "$sub"
+            printf "    Use '--instance %s' to reach the rolling development host.\n" "$DEV_SUBDOMAIN"
+        fi
+    fi
     exit 0
 }
 
@@ -195,6 +304,16 @@ Options:
 Examples:
   mirc install
   mirc install --prefix ~/bin --force
+
+Note on which host the installed `mirc` talks to:
+  Installing COPIES this script to ~/.claude/skills/..., so the installed
+  `mirc` is an installed copy and targets the LIVE instance — even when you
+  installed it from a repo checkout. Running the repo file directly
+  (skills/mimiry-softlaunch/scripts/mirc.sh) targets the development host.
+
+  So on a developer machine the two can point at different hosts. That is
+  deliberate: `mirc install` produces the artifact an end user gets. Use
+  '--instance <subdomain>' on either to override.
 EOF
     exit 0
 }
@@ -624,6 +743,7 @@ ensure_token() {
     rm -f "$tmpfile" "${tmpfile}.sig"
 
     local http_status
+    _preflight_host
     response=$(curl -sS -w '\n%{http_code}' -X POST "${API_BASE}/api/v1/auth/token" \
         -H "X-SSH-Fingerprint: $fingerprint" \
         -H "X-SSH-Signature: $signature" \
@@ -654,6 +774,7 @@ ensure_token() {
 # things that say what to do next, were the parts thrown away.
 _api_request() {
     local method="$1" path="$2" body status
+    _preflight_host
     body=$(curl -sS -w '\n%{http_code}' -X "$method" "$API$path" \
         -H "Authorization: Bearer $MIMIRY_TOKEN") \
         || die "$method $path: could not reach ${API_HOST}"
@@ -2169,7 +2290,7 @@ while [ $# -gt 0 ]; do
                     OPT_KEY="${2:?'--key' requires a path}"; shift 2
                 fi
                 ;;
-            --instance) OPT_INSTANCE="${2:?'--instance' requires a name (e.g. beta, softlaunch)}"; shift 2 ;;
+            --instance) OPT_INSTANCE="${2:?'--instance' requires a SUBDOMAIN (e.g. trunk)}"; shift 2 ;;
             *)          CMD_ARGS+=("$1"); shift ;;
         esac
         continue
@@ -2177,7 +2298,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --help|-h)  usage ;;
         --key)      OPT_KEY="${2:?'--key' requires a path}"; shift 2 ;;
-        --instance) OPT_INSTANCE="${2:?'--instance' requires a name (e.g. beta, softlaunch)}"; shift 2 ;;
+        --instance) OPT_INSTANCE="${2:?'--instance' requires a SUBDOMAIN (e.g. trunk)}"; shift 2 ;;
         -*)         die "unknown option: $1" ;;
         *)          CMD="$1"; shift ;;
     esac
@@ -2188,6 +2309,12 @@ done
 _configure_api_base
 
 case "$CMD" in
+    # Prints the resolved API base and exits. Exists so that "which host am I
+    # actually talking to?" is answerable without reading the source — the
+    # question nobody could answer during either of the two dead-host
+    # incidents. It is also the single definition that mimiry-auth.sh reads,
+    # so the two scripts cannot drift apart on the default host.
+    api-base) printf '%s\n' "$API_BASE" ;;
     auth)    cmd_auth "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
     install) cmd_install "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
     session) cmd_session "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;

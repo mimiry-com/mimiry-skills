@@ -10,7 +10,33 @@
 #   3. Write to file, sign with ssh-keygen -Y sign -n mimiry-auth
 #   4. Base64-encode the .sig file, exchange for JWT
 SSH_KEY="${1:?Usage: mimiry-auth.sh <ssh_key_path> [api_base]}"
-API_BASE="${2:-https://softlaunch.mimiry.com}"
+
+# The default host is ASKED FOR, not restated.
+#
+# This line used to read:
+#
+#     API_BASE="${2:-https://softlaunch.mimiry.com}"
+#
+# — naming an instance decommissioned on 2026-07-25, so every documented
+# `curl "${MIMIRY_API}/..."` example in SKILL.md had been pointing at a host
+# with no DNS record for over a year. It was the FOURTH place deriving or
+# hard-coding a host this way, and the reason each one survived is that fixing
+# one copy never touches the others.
+#
+# So this asks mirc.sh, which owns the answer, instead of keeping a second one.
+# The two ship side by side in scripts/, and mirc.sh stays self-contained (it
+# reads nothing from here) so that `mirc install` copying a single file still
+# works.
+_MA_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
+if [ -n "${2:-}" ]; then
+    API_BASE="$2"
+elif [ -x "$_MA_DIR/mirc.sh" ]; then
+    API_BASE="$("$_MA_DIR/mirc.sh" api-base)"
+else
+    echo "Error: cannot resolve the API base — $_MA_DIR/mirc.sh is missing." >&2
+    echo "       Pass one explicitly: source mimiry-auth.sh <key> <api_base>" >&2
+    exit 1
+fi
 
 # Strip .pub extension if provided — we need both the private key and .pub
 SSH_KEY="${SSH_KEY%.pub}"
