@@ -1380,10 +1380,23 @@ cmd_session_terminate() {
     done
     [ -n "$id" ] || die "usage: mirc session terminate <session_id> [--wait]"
     ensure_token
-    api_delete "/sessions/$id" | jq . 2>/dev/null || true
+    # 🚨 Convention 37 — THIS USED TO ANNOUNCE SUCCESS FOR A REQUEST THAT
+    # FAILED, AND EXIT 1 FOR ONE THAT WORKED.
+    #
+    # It was `api_delete … | jq . 2>/dev/null || true`, and both halves of that
+    # line were wrong. `die` inside a PIPELINE runs in a subshell, so a 404 or a
+    # 500 killed the subshell and execution carried straight on to print
+    # "Terminate request sent" — a false statement about a live session. And the
+    # bare `return` below inherited the status of the `[ … ]` test that precedes
+    # it, which is FALSE whenever --wait was not passed: every successful
+    # terminate exited 1. Between the two, neither the text nor the exit code
+    # distinguished "terminated" from "not found".
+    local resp
+    resp=$(api_delete "/sessions/$id") || exit 1 # api_delete already said why
+    printf '%s' "$resp" | jq . 2>/dev/null || printf '%s\n' "$resp"
     echo "Terminate request sent for $id" >&2
 
-    [ "$wait_flag" = true ] || return
+    [ "$wait_flag" = true ] || return 0
 
     echo "Waiting for session to reach terminal state ..." >&2
     local start_ts now elapsed state operation detail timeout_secs=300
@@ -1724,10 +1737,15 @@ cmd_volume_delete() {
     done
     [ -n "$id" ] || die "usage: mirc volume delete <volume_id> [--wait]"
     ensure_token
-    api_delete "/volumes/$id" | jq . 2>/dev/null || true
+    # Same defect, same fix as cmd_session_terminate — see the note there. A
+    # volume delete that 404s must not print "Delete request sent", and one that
+    # succeeds must not exit 1.
+    local resp
+    resp=$(api_delete "/volumes/$id") || exit 1 # api_delete already said why
+    printf '%s' "$resp" | jq . 2>/dev/null || printf '%s\n' "$resp"
     echo "Delete request sent for $id" >&2
 
-    [ "$wait_flag" = true ] || return
+    [ "$wait_flag" = true ] || return 0
 
     echo "Waiting for volume to reach state=deleted ..." >&2
     local start_ts now elapsed state operation detail timeout_secs=180
