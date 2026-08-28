@@ -518,7 +518,10 @@ Options:
   --form-factor FF        Filter by form factor (e.g. SXM)
   --min-vram N            Minimum VRAM in GB
   --include-all           Include unavailable GPUs
-  --include-cpu           Include CPU-only offerings (filtered out by default)
+  --include-cpu           Include CPU-only offerings. They are excluded by
+                          DEFAULT and by design: a CPU box is the cheapest row
+                          on the catalogue, so choosing one has to be
+                          deliberate. `--gpu CPU` is how you ask for one.
   --detail full           Show full details
   --cheapest              Print just the single cheapest matching LISTING —
                           one SKU, from one provider, at one location
@@ -1464,6 +1467,11 @@ cmd_session_availability() {
     [ -n "$location" ]    && qs="${qs}&location=${location}"
     [ -n "$detail" ]      && qs="${qs}&detail=${detail}"
     [ "$include_all" = true ] && qs="${qs}&available_only=false"
+    # CPU is excluded by the API unless asked for (RC-204, owner 2026-08-28).
+    # This used to be a client-side `vram_gb > 0` filter here, which meant the
+    # rule existed in mirc and was missing from the portal. It is now one rule,
+    # server-side, and this flag just passes it through.
+    [ "$include_cpu" = true ] && qs="${qs}&include_cpu=true"
 
     if [ -n "$qs" ]; then qs="?${qs:1}"; fi
 
@@ -1474,11 +1482,6 @@ cmd_session_availability() {
         result=$(echo "$result" | jq --arg p "$provider" '
             .gpu_models |= [.[] | select(.providers | any(.provider == $p))]')
     fi
-    if [ "$include_cpu" = false ]; then
-        result=$(echo "$result" | jq '
-            .gpu_models |= [.[] | select((.vram_gb // 0) > 0)]')
-    fi
-
     if [ "$cheapest" = false ]; then
         echo "$result" | jq .
         return
@@ -1495,7 +1498,7 @@ cmd_session_availability() {
     local pick
     pick=$(echo "$result" | jq --arg p "$provider" '
         [ .gpu_models[]
-          | select(.available == true and (.vram_gb // 0) > 0)
+          | select(.available == true)
           | .name as $gpu | .display_name as $disp | .vram_gb as $vram
           | .skus[]?
           | select(.available == true)
