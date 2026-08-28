@@ -368,9 +368,11 @@ Required:
   (one of:)
     --gpu  TYPE[,TYPE…]   Explicit GPU type list, in preference order
     --family FAM[,FAM…]   Criteria: GPU family (e.g. H100,A100), in pref order
-    --min-vram N          Criteria: minimum VRAM in GB
+    --vram N              Criteria: VRAM in GB (exact)
     --form-factor FF      Criteria: PCIe or SXM
     --arch ARCH[,ARCH…]   Criteria: silicon generation, in preference order
+    --vcpu N              Criteria: vCPUs (exact)
+    --ram N               Criteria: host RAM in GB (exact)
 
 Optional:
   --command CMD           Command to run (omit for interactive shell)
@@ -385,6 +387,17 @@ Optional:
   --priority KEY[,KEY…]   Ordered sort keys: PRICE | GPU | FAMILY |
                           FORM_FACTOR | VRAM | ARCH. Default ["GPU"] when
                           --gpu is the only criterion; ["PRICE"] otherwise.
+  --min-vram N            Bounds. Every exact flag above is the pair set to
+  --max-vram N            the same number: `--vcpu 64` IS `--min-vcpu 64
+  --min-vcpu N            --max-vcpu 64`, and either half may be given alone.
+  --max-vcpu N            An inclusive range, so `--vcpu 64` selects a 64-vCPU
+  --min-ram N             machine rather than nothing.
+  --max-ram N
+  --max-gpu-count N       Ceiling on GPUs per machine. 🚨 --gpu-count is a
+                          FLOOR, not an exact match — an unset count defaults
+                          to 1, so making it exact would quietly restrict every
+                          request that never mentioned GPUs to single-GPU
+                          machines. Pass both for exactly N.
   --cheapest              Shortcut for --priority PRICE
   --max-attempts N        Retry cap on provider capacity errors (default 3)
   --max-price EUR         Reject candidates above this hourly rate (EUR,
@@ -401,6 +414,13 @@ Architecture (--arch):
   --arch a request lands on whichever is cheaper.
 
     mirc session availability          # shows the architecture of every SKU
+
+Telling nine CPU machines apart:
+  `CPU` is one canonical name covering 4 to 360 vCPU at a 90x price spread, so
+  vCPU and host RAM are the only things that separate them:
+
+    mirc session create --name etl --image docker.io/library/ubuntu:22.04 \
+        --gpu CPU --vcpu 64 --ram 256
 
 GPU naming:
   Mimiry canonical names follow the pattern {Family}_{Vram}G_{FormFactor}.
@@ -971,6 +991,7 @@ cmd_session_create() {
     local gpu_count=1 auto_terminate="" no_ssh=false max_duration=""
     local wait_flag=false
     local family="" min_vram="" form_factor="" arch="" priority="" max_attempts="" max_price=""
+    local max_vram="" min_vcpu="" max_vcpu="" min_ram="" max_ram="" max_gpu_count=""
     local cheapest=false
     local -a env_vars=()
     local -a volumes=()
@@ -991,6 +1012,19 @@ cmd_session_create() {
             --max-duration)   max_duration="${2:?'--max-duration' requires a value}"; shift 2 ;;
             --family)         family="${2:?'--family' requires a value}"; shift 2 ;;
             --min-vram)       min_vram="${2:?'--min-vram' requires a value}"; shift 2 ;;
+            --max-vram)       max_vram="${2:?'--max-vram' requires a value}"; shift 2 ;;
+            --min-vcpu)       min_vcpu="${2:?'--min-vcpu' requires a value}"; shift 2 ;;
+            --max-vcpu)       max_vcpu="${2:?'--max-vcpu' requires a value}"; shift 2 ;;
+            --min-ram)        min_ram="${2:?'--min-ram' requires a value in GB}"; shift 2 ;;
+            --max-ram)        max_ram="${2:?'--max-ram' requires a value in GB}"; shift 2 ;;
+            --max-gpu-count)  max_gpu_count="${2:?'--max-gpu-count' requires a value}"; shift 2 ;;
+            # Exact forms. `--vcpu 64` IS `--min-vcpu 64 --max-vcpu 64` — the
+            # server has no separate "exact" concept, deliberately, so the
+            # selector and the affordability gate cannot read one differently
+            # from the other. Written here, once, in the place a person types.
+            --vram)           min_vram="${2:?'--vram' requires a value}"; max_vram="$2"; shift 2 ;;
+            --vcpu)           min_vcpu="${2:?'--vcpu' requires a value}"; max_vcpu="$2"; shift 2 ;;
+            --ram)            min_ram="${2:?'--ram' requires a value in GB}"; max_ram="$2"; shift 2 ;;
             --form-factor)    form_factor="${2:?'--form-factor' requires a value}"; shift 2 ;;
             --arch)           arch="${2:?'--arch' requires a value}"; shift 2 ;;
             --priority)       priority="${2:?'--priority' requires a value}"; shift 2 ;;
@@ -1011,8 +1045,10 @@ cmd_session_create() {
 
     [ -n "$name" ]  || die "session create requires --name"
     [ -n "$image" ] || die "session create requires --image"
-    if [ -z "$gpu" ] && [ -z "$family" ] && [ -z "$min_vram" ] && [ -z "$form_factor" ] && [ -z "$arch" ] && [ -z "$priority" ]; then
-        die "session create requires --gpu, --cheapest, --priority, or at least one of --family / --min-vram / --form-factor / --arch"
+    if [ -z "$gpu" ] && [ -z "$family" ] && [ -z "$min_vram" ] && [ -z "$max_vram" ] \
+       && [ -z "$form_factor" ] && [ -z "$arch" ] && [ -z "$min_vcpu" ] && [ -z "$max_vcpu" ] \
+       && [ -z "$min_ram" ] && [ -z "$max_ram" ] && [ -z "$priority" ]; then
+        die "session create requires --gpu, --cheapest, --priority, or at least one of --family / --vram / --form-factor / --arch / --vcpu / --ram"
     fi
 
     need jq
@@ -1063,6 +1099,24 @@ cmd_session_create() {
     # and `--arch BLKWL` are the same request.
     if [ -n "$arch" ]; then
         json=$(echo "$json" | jq --arg v "$arch" '.gpu.architecture = ($v | split(","))')
+    fi
+    if [ -n "$max_vram" ]; then
+        json=$(echo "$json" | jq --argjson v "$max_vram" '.gpu.max_vram_gb = $v')
+    fi
+    if [ -n "$min_vcpu" ]; then
+        json=$(echo "$json" | jq --argjson v "$min_vcpu" '.gpu.min_vcpus = $v')
+    fi
+    if [ -n "$max_vcpu" ]; then
+        json=$(echo "$json" | jq --argjson v "$max_vcpu" '.gpu.max_vcpus = $v')
+    fi
+    if [ -n "$min_ram" ]; then
+        json=$(echo "$json" | jq --argjson v "$min_ram" '.gpu.min_memory_gb = $v')
+    fi
+    if [ -n "$max_ram" ]; then
+        json=$(echo "$json" | jq --argjson v "$max_ram" '.gpu.max_memory_gb = $v')
+    fi
+    if [ -n "$max_gpu_count" ]; then
+        json=$(echo "$json" | jq --argjson v "$max_gpu_count" '.gpu.max_gpu_count = $v')
     fi
     if [ -n "$priority" ]; then
         json=$(echo "$json" | jq --arg v "$priority" '.gpu.priority = ($v | split(","))')
