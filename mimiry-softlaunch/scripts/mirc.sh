@@ -370,6 +370,7 @@ Required:
     --family FAM[,FAM…]   Criteria: GPU family (e.g. H100,A100), in pref order
     --min-vram N          Criteria: minimum VRAM in GB
     --form-factor FF      Criteria: PCIe or SXM
+    --arch ARCH[,ARCH…]   Criteria: silicon generation, in preference order
 
 Optional:
   --command CMD           Command to run (omit for interactive shell)
@@ -382,13 +383,24 @@ Optional:
   --no-ssh                Disable SSH access
   --max-duration SECS     Max session duration in seconds
   --priority KEY[,KEY…]   Ordered sort keys: PRICE | GPU | FAMILY |
-                          FORM_FACTOR | VRAM. Default ["GPU"] when --gpu
-                          is the only criterion; ["PRICE"] otherwise.
+                          FORM_FACTOR | VRAM | ARCH. Default ["GPU"] when
+                          --gpu is the only criterion; ["PRICE"] otherwise.
   --cheapest              Shortcut for --priority PRICE
   --max-attempts N        Retry cap on provider capacity errors (default 3)
   --max-price EUR         Reject candidates above this hourly rate (EUR,
                           post-margin — same number availability shows)
   --wait                  Block until state=running and SSH is ready
+
+Architecture (--arch):
+  VOLTA | TURING | AMPERE | ADA | HOPPER | BLKWL. Case-insensitive, and full
+  names work too ("blackwell", "ada lovelace").
+
+  It is the ONLY way to choose between two cards that share a canonical name.
+  RTX_48G_PCIe is served by an RTX A6000 (AMPERE) and an RTX 6000 Ada (ADA):
+  same VRAM, same form factor, same vCPU and RAM, 1.70x apart in price. Without
+  --arch a request lands on whichever is cheaper.
+
+    mirc session availability          # shows the architecture of every SKU
 
 GPU naming:
   Mimiry canonical names follow the pattern {Family}_{Vram}G_{FormFactor}.
@@ -406,6 +418,11 @@ Examples:
   # Criteria-based (server picks the specific canonical name):
   mirc session create --name h100-train --image nvcr.io/nvidia/pytorch:24.01-py3 \
       --family H100 --min-vram 80 --priority PRICE
+
+  # The dearer of two cards sharing one canonical name
+  mirc session create --name ada-bench --image nvcr.io/nvidia/pytorch:24.01-py3 \
+      --gpu RTX_48G_PCIe --arch ADA
+
   mirc session create --name demo --image docker.io/nvidia/cuda:12.2.0-base-ubuntu22.04 \
       --gpu RTX_96G --provider verda --location FIN-03 \
       --volume data1:/data --auto-terminate never --wait
@@ -953,7 +970,7 @@ cmd_session_create() {
     local name="" image="" gpu="" command="" provider="" location=""
     local gpu_count=1 auto_terminate="" no_ssh=false max_duration=""
     local wait_flag=false
-    local family="" min_vram="" form_factor="" priority="" max_attempts="" max_price=""
+    local family="" min_vram="" form_factor="" arch="" priority="" max_attempts="" max_price=""
     local cheapest=false
     local -a env_vars=()
     local -a volumes=()
@@ -975,6 +992,7 @@ cmd_session_create() {
             --family)         family="${2:?'--family' requires a value}"; shift 2 ;;
             --min-vram)       min_vram="${2:?'--min-vram' requires a value}"; shift 2 ;;
             --form-factor)    form_factor="${2:?'--form-factor' requires a value}"; shift 2 ;;
+            --arch)           arch="${2:?'--arch' requires a value}"; shift 2 ;;
             --priority)       priority="${2:?'--priority' requires a value}"; shift 2 ;;
             --max-attempts)   max_attempts="${2:?'--max-attempts' requires a value}"; shift 2 ;;
             --max-price)      max_price="${2:?'--max-price' requires a value in EUR}"; shift 2 ;;
@@ -993,8 +1011,8 @@ cmd_session_create() {
 
     [ -n "$name" ]  || die "session create requires --name"
     [ -n "$image" ] || die "session create requires --image"
-    if [ -z "$gpu" ] && [ -z "$family" ] && [ -z "$min_vram" ] && [ -z "$form_factor" ] && [ -z "$priority" ]; then
-        die "session create requires --gpu, --cheapest, --priority, or at least one of --family / --min-vram / --form-factor"
+    if [ -z "$gpu" ] && [ -z "$family" ] && [ -z "$min_vram" ] && [ -z "$form_factor" ] && [ -z "$arch" ] && [ -z "$priority" ]; then
+        die "session create requires --gpu, --cheapest, --priority, or at least one of --family / --min-vram / --form-factor / --arch"
     fi
 
     need jq
@@ -1037,6 +1055,14 @@ cmd_session_create() {
     fi
     if [ -n "$min_vram" ]; then
         json=$(echo "$json" | jq --argjson v "$min_vram" '.gpu.vram_gb = [$v]')
+    fi
+    # --arch is the only way to ask for one of two cards sharing a canonical
+    # name: RTX_48G_PCIe is an RTX A6000 (AMPERE) or an RTX 6000 Ada (ADA),
+    # identical on every other axis and 1.70x apart in price (RC-240). The
+    # server normalises case and accepts full names, so `--arch blackwell`
+    # and `--arch BLKWL` are the same request.
+    if [ -n "$arch" ]; then
+        json=$(echo "$json" | jq --arg v "$arch" '.gpu.architecture = ($v | split(","))')
     fi
     if [ -n "$priority" ]; then
         json=$(echo "$json" | jq --arg v "$priority" '.gpu.priority = ($v | split(","))')
