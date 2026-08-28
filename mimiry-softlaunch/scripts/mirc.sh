@@ -520,9 +520,14 @@ Options:
   --include-all           Include unavailable GPUs
   --include-cpu           Include CPU-only offerings (filtered out by default)
   --detail full           Show full details
-  --cheapest              Print just the single cheapest matching offering
+  --cheapest              Print just the single cheapest matching LISTING —
+                          one SKU, from one provider, at one location
                           (one human-readable line, or JSON with --json)
   --json                  Machine-readable output (only with --cheapest)
+
+Each gpu_model carries `skus[]`, and each SKU its own `listings[]`. A model
+name is a product family: RTX_48G_PCIe is served by an RTX A6000 and an RTX
+6000 Ada at very different prices, so the price lives on the SKU.
 
 Examples:
   mirc session availability --family H100 --provider verda
@@ -1479,24 +1484,47 @@ cmd_session_availability() {
         return
     fi
 
-    # --cheapest: flatten to one row per (gpu, provider, location), filter by
-    # --provider if given, sort by hourly_rate, return the top row.
+    # --cheapest: flatten to one row per LISTING and take the cheapest.
+    #
+    # 🚨 IT FLATTENS `skus[].listings[]`, NOT `providers[].locations[]` (RC-218).
+    # The model-level `providers` array carries a provider's cheapest rate beside
+    # every location that provider serves, so the old flatten paired one rate
+    # with locations that do not offer it — and, worse, `gpu` alone does not name
+    # a machine: `RTX_48G_PCIe` is an RTX A6000 and an RTX 6000 Ada, 1.70x apart.
+    # A listing states provider, location and rate together, for one SKU.
     local pick
     pick=$(echo "$result" | jq --arg p "$provider" '
         [ .gpu_models[]
           | select(.available == true and (.vram_gb // 0) > 0)
           | .name as $gpu | .display_name as $disp | .vram_gb as $vram
-          | .currency as $cur
-          | .providers[]
+          | .skus[]?
+          | select(.available == true)
+          | .sku as $sku | .currency as $cur
+          | .gpu_count as $n | .vcpus as $v | .memory_gb as $m
+          | .listings[]
+          | select(.available == true)
           | select(($p == "") or (.provider == $p))
-          | .provider as $prov | .hourly_rate as $rate
-          | .locations[]
-          | { gpu: $gpu, display_name: $disp, vram_gb: $vram,
-              provider: $prov, hourly_rate: $rate, currency: $cur, location: . } ]
+          | { gpu: $gpu, sku: $sku, display_name: $disp, vram_gb: $vram,
+              gpu_count: $n, vcpus: $v, memory_gb: $m,
+              provider: .provider, hourly_rate: .hourly_rate,
+              currency: $cur, location: .location,
+              instance_type: .instance_type } ]
         | sort_by(.hourly_rate)
         | .[0] // empty')
 
     if [ -z "$pick" ] || [ "$pick" = "null" ]; then
+        # Convention 37: "nothing matched" and "I could not tell" are different
+        # answers. An api-compute older than 2026-08-28 publishes no `skus` at
+        # all, and reporting that as "no offerings" would send someone hunting
+        # for capacity that is there.
+        local models_seen skus_seen
+        models_seen=$(echo "$result" | jq '[.gpu_models[]] | length')
+        skus_seen=$(echo "$result" | jq '[.gpu_models[] | select(has("skus"))] | length')
+        if [ "$models_seen" -gt 0 ] && [ "$skus_seen" -eq 0 ]; then
+            die "this api-compute does not publish per-SKU listings (pre-2026-08-28).
+Upgrade it, or drop --cheapest and read the response directly — picking from
+the model level would quote a price for a machine you may not get."
+        fi
         die "no available GPU offerings match the filter"
     fi
 
@@ -1504,7 +1532,7 @@ cmd_session_availability() {
         echo "$pick" | jq -c .
     else
         echo "$pick" | jq -r '
-            "\(.display_name) (\(.gpu))  provider=\(.provider)  location=\(.location)  \(.currency) \(.hourly_rate)/hr"'
+            "\(.display_name) (\(.sku))  provider=\(.provider)  location=\(.location)  \(.currency) \(.hourly_rate)/hr"'
     fi
 }
 
