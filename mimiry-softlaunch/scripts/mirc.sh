@@ -239,16 +239,16 @@ Quick examples:
   mirc auth --key ~/.ssh/mimiry
   mirc session list --state running
   mirc volume create --name data1 --size-gb 100 --wait
-  mirc session availability --cheapest --provider verda --json
+  mirc session availability --cheapest --json
 
 Demo — cheapest GPU + persistent volume + interactive session:
-  pick=$(mirc session availability --cheapest --provider verda --json)
+  pick=$(mirc session availability --cheapest --json)
   gpu=$(echo "$pick" | jq -r .gpu)
   loc=$(echo "$pick" | jq -r .location)
   mirc volume create --name demo-vol --size-gb 100 --location "$loc" --wait
   mirc session create \
       --name demo --image docker.io/nvidia/cuda:12.2.0-base-ubuntu22.04 \
-      --gpu "$gpu" --provider verda --location "$loc" \
+      --gpu "$gpu" --location "$loc" \
       --volume demo-vol:/data --auto-terminate never \
       --command 'nvidia-smi | tee /data/nvidia-smi-log; sleep infinity' \
       --wait
@@ -549,7 +549,12 @@ Usage: mirc session availability [opts]
 Check GPU availability and pricing across providers.
 
 Options:
-  --provider PROV         Filter by provider (e.g. verda, gcp)
+  --provider PROV         Filter by provider name.
+                          🚨 USUALLY UNAVAILABLE. Vendor names are withheld from
+                          external responses by decision (api-compute setting
+                          compute_expose_provider_names, default off), and this
+                          filter needs them. It fails with a clear message rather
+                          than returning an empty list.
   --location LOC          Filter by location
   --family FAM            Filter by GPU family (comma-separated)
   --form-factor FF        Filter by form factor (e.g. SXM)
@@ -570,8 +575,8 @@ name is a product family: RTX_48G_PCIe is served by an RTX A6000 and an RTX
 6000 Ada at very different prices, so the price lives on the SKU.
 
 Examples:
-  mirc session availability --family H100 --provider verda
-  mirc session availability --cheapest --provider verda --json
+  mirc session availability --family H100
+  mirc session availability --cheapest --json
 EOF
     exit 0
 }
@@ -1558,7 +1563,21 @@ cmd_session_availability() {
     local result
     result=$(curl -sf "${API}/availability${qs}")
 
+    # 🚨 --provider CANNOT WORK WHEN THE API DOES NOT NAME VENDORS, AND IT MUST
+    # SAY SO RATHER THAN RETURN NOTHING. Owner + business partner decided on
+    # 2026-09-29 not to name providers externally; api-compute enforces it with
+    # `compute_expose_provider_names` (default off) by blanking the field. A
+    # `select(.provider == $p)` against blanked names matches zero models, and
+    # "no GPUs match" is a different answer from "this filter is switched off"
+    # (Convention 37). So check whether ANY name came back before filtering.
     if [ -n "$provider" ]; then
+        local any_named
+        any_named=$(echo "$result" | jq '[.gpu_models[]?.providers[]?.provider | select(. != null and . != "")] | length')
+        if [ "${any_named:-0}" -eq 0 ]; then
+            die "--provider cannot be used: this deployment does not publish provider names.
+Vendor naming is withheld by decision (api-compute setting
+compute_expose_provider_names). Drop --provider, or have it enabled."
+        fi
         result=$(echo "$result" | jq --arg p "$provider" '
             .gpu_models |= [.[] | select(.providers | any(.provider == $p))]')
     fi
@@ -1589,7 +1608,8 @@ cmd_session_availability() {
           | select(($p == "") or (.provider == $p))
           | { gpu: $gpu, sku: $sku, display_name: $disp, vram_gb: $vram,
               gpu_count: $n, vcpus: $v, memory_gb: $m,
-              provider: .provider, hourly_rate: .hourly_rate,
+              provider: (if (.provider // "") == "" then null else .provider end),
+              hourly_rate: .hourly_rate,
               currency: $cur, location: .location,
               instance_type: .instance_type } ]
         | sort_by(.hourly_rate)
