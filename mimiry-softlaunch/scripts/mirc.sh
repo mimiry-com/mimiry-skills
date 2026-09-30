@@ -400,8 +400,18 @@ Optional:
                           machines. Pass both for exactly N.
   --cheapest              Shortcut for --priority PRICE
   --max-attempts N        Retry cap on provider capacity errors (default 3)
-  --max-price EUR         Reject candidates above this hourly rate (EUR,
-                          post-margin — same number availability shows)
+  --min-price EUR         Reject candidates BELOW this hourly rate
+  --max-price EUR         Reject candidates ABOVE this hourly rate
+                          Both EUR, post-margin — the same numbers availability
+                          shows, and the same filter it accepts.
+                          🚨 A floor is not just symmetry. The catalogue lists a
+                          model at the cheapest listing it knows, which is often
+                          its oldest or least-provisioned variant — and sometimes
+                          one with no stock at all. A floor is how you say "not
+                          the bargain end" without knowing which SKU that is.
+                          There is deliberately no exact form: rates are
+                          post-margin floats, so an exact match would silently
+                          match nothing when the last decimal moves.
   --wait                  Block until state=running and SSH is ready
 
 Architecture (--arch):
@@ -559,6 +569,18 @@ Options:
   --family FAM            Filter by GPU family (comma-separated)
   --form-factor FF        Filter by form factor (e.g. SXM)
   --min-vram N            Minimum VRAM in GB
+  --min-price EUR         Only listings at or above this hourly rate
+  --max-price EUR         Only listings at or below this hourly rate
+                          🚨 FILTERS LISTINGS, NOT THE MODEL'S HEADLINE RATE, and
+                          that is the useful part. A model's advertised rate is
+                          the cheapest listing we know of, which may have no
+                          stock: on 2026-09-30 RTX_96G_PCIe showed EUR 1.3624
+                          while the only machine in stock cost EUR 2.4590. Asking
+                          for --max-price 2 excludes it, because nothing in that
+                          band can actually be bought.
+                          An unreadable or inverted band is a 400, never an empty
+                          list — "we have nothing in your budget" is a different
+                          answer from "I could not read your filter".
   --include-all           Include unavailable GPUs
   --include-cpu           Include CPU-only offerings. They are excluded by
                           DEFAULT and by design: a CPU box is the cheapest row
@@ -996,6 +1018,7 @@ cmd_session_create() {
     local gpu_count=1 auto_terminate="" no_ssh=false max_duration=""
     local wait_flag=false
     local family="" min_vram="" form_factor="" arch="" priority="" max_attempts="" max_price=""
+    local min_price=""
     local max_vram="" min_vcpu="" max_vcpu="" min_ram="" max_ram="" max_gpu_count=""
     local cheapest=false
     local -a env_vars=()
@@ -1034,6 +1057,7 @@ cmd_session_create() {
             --arch)           arch="${2:?'--arch' requires a value}"; shift 2 ;;
             --priority)       priority="${2:?'--priority' requires a value}"; shift 2 ;;
             --max-attempts)   max_attempts="${2:?'--max-attempts' requires a value}"; shift 2 ;;
+            --min-price)      min_price="${2:?'--min-price' requires a value in EUR}"; shift 2 ;;
             --max-price)      max_price="${2:?'--max-price' requires a value in EUR}"; shift 2 ;;
             --cheapest)       cheapest=true; shift ;;
             --wait)           wait_flag=true; shift ;;
@@ -1128,6 +1152,9 @@ cmd_session_create() {
     fi
     if [ -n "$max_attempts" ]; then
         json=$(echo "$json" | jq --argjson v "$max_attempts" '.gpu.max_attempts = $v')
+    fi
+    if [ -n "$min_price" ]; then
+        json=$(echo "$json" | jq --argjson v "$min_price" '.gpu.min_hourly_rate = $v')
     fi
     if [ -n "$max_price" ]; then
         json=$(echo "$json" | jq --argjson v "$max_price" '.gpu.max_hourly_rate = $v')
@@ -1526,6 +1553,7 @@ cmd_session_terminate() {
 cmd_session_availability() {
     _has_help_flag "$@" && session_availability_help
     local provider="" location="" family="" form_factor="" min_vram=""
+    local min_price="" max_price=""
     local include_all=false include_cpu=false detail=""
     local cheapest=false as_json=false
 
@@ -1536,6 +1564,8 @@ cmd_session_availability() {
             --family)      family="${2:?'--family' requires a value}"; shift 2 ;;
             --form-factor) form_factor="${2:?'--form-factor' requires a value}"; shift 2 ;;
             --min-vram)    min_vram="${2:?'--min-vram' requires a value}"; shift 2 ;;
+            --min-price)   min_price="${2:?'--min-price' requires a value in EUR}"; shift 2 ;;
+            --max-price)   max_price="${2:?'--max-price' requires a value in EUR}"; shift 2 ;;
             --include-all) include_all=true; shift ;;
             --include-cpu) include_cpu=true; shift ;;
             --detail)      detail="${2:?'--detail' requires a value}"; shift 2 ;;
@@ -1549,6 +1579,13 @@ cmd_session_availability() {
     [ -n "$family" ]      && qs="${qs}&gpu_family=${family}"
     [ -n "$form_factor" ] && qs="${qs}&form_factor=${form_factor}"
     [ -n "$min_vram" ]    && qs="${qs}&min_vram_gb=${min_vram}"
+    # 🚨 The band names the same two fields session create does, so "what can I
+    # get for under X" and "provision me something under X" are one vocabulary.
+    # The server REFUSES an unreadable or inverted band with 400 rather than
+    # ignoring it — a silently dropped price filter returns EUR 38/h machines to
+    # somebody who asked for under EUR 2.
+    [ -n "$min_price" ]   && qs="${qs}&min_hourly_rate=${min_price}"
+    [ -n "$max_price" ]   && qs="${qs}&max_hourly_rate=${max_price}"
     [ -n "$location" ]    && qs="${qs}&location=${location}"
     [ -n "$detail" ]      && qs="${qs}&detail=${detail}"
     [ "$include_all" = true ] && qs="${qs}&available_only=false"
