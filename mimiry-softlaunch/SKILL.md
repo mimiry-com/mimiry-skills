@@ -40,11 +40,21 @@ running any commands, locate the skill installation directory by checking
 these paths (in order):
 
 1. `~/.agents/skills/mimiry-softlaunch/` (npx skills standard location)
-2. `~/.claude/skills/mimiry-softlaunch/` (Claude Code symlink)
+2. `~/.claude/skills/mimiry-softlaunch/` (a **copy**, written by `mirc install`)
+3. the `skills/mimiry-softlaunch/` checkout itself (always present; the only
+   location on a machine where the skill has not been installed)
 
 Use whichever exists. In all command examples below, **`SKILL_DIR`** is a
 placeholder for this resolved path — substitute the actual path when
 executing commands.
+
+Two corrections, 2026-10-06: path 2 used to be described as a "Claude Code
+symlink", and `mirc install` copies rather than links — which matters, because a
+copy goes stale while a symlink cannot. And the checkout was not listed at all,
+so on a machine with no installed copy this list resolved to nothing. That is
+now the normal state here: `~/.claude/skills/mimiry-softlaunch` was deliberately
+removed because everything in it except `mirc` was out of date, and `mirc` is
+reached through a symlink to the checkout instead.
 
 ---
 
