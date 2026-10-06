@@ -1056,6 +1056,40 @@ cmd_install() {
     local self
     self=$(realpath "${BASH_SOURCE[0]}")
 
+    # 🚨 PREFLIGHT — Convention 37 clause 3: verify every phase can complete
+    # before starting any. This decides what happens to the symlink WITHOUT
+    # touching the filesystem, so a refusal leaves nothing behind.
+    #
+    # It used to write the canonical copy first and only then look at the
+    # symlink, which `die`s without --force. So an install that REFUSED still
+    # created $HOME/.claude/skills/mimiry-softlaunch/ and left a copy of mirc
+    # in it. On 2026-10-06 the owner deliberately deleted that directory —
+    # everything in it but mirc was long out of date — and a single refused
+    # `mirc install` would have silently put half of it back.
+    local link_action
+    if [ -L "$link" ]; then
+        local current
+        current=$(readlink "$link")
+        if [ "$current" = "$canonical" ]; then
+            link_action="already"
+        elif [ "$force" = true ]; then
+            link_action="replace-symlink"
+        else
+            die "$link is a symlink to $current. Re-run with --force to replace.
+  Nothing was written: the canonical copy is not created unless the symlink can
+  also be pointed at it."
+        fi
+    elif [ -e "$link" ]; then
+        if [ "$force" = true ]; then
+            link_action="replace-file"
+        else
+            die "$link exists and is not a symlink. Re-run with --force to replace.
+  Nothing was written."
+        fi
+    else
+        link_action="create"
+    fi
+
     # Make sure the canonical install location holds a copy of mirc. If it's
     # missing, copy ourselves there. If it exists but differs from the running
     # script, leave it alone unless --force is given (avoids surprise overwrite
@@ -1078,31 +1112,36 @@ cmd_install() {
 
     mkdir -p "$prefix"
 
-    # Decide what to do with whatever currently lives at $link.
-    if [ -L "$link" ]; then
-        local current
-        current=$(readlink "$link")
-        if [ "$current" = "$canonical" ]; then
-            echo "Already installed: $link → $canonical" >&2
-        elif [ "$force" = true ]; then
-            rm -f "$link"
+    # Act on the decision the preflight already made. No new checks here —
+    # a second evaluation is a second chance to disagree with the first.
+    case "$link_action" in
+        already)
+            echo "Already installed: $link → $canonical" >&2 ;;
+        replace-symlink)
+            rm -f "$link"; ln -s "$canonical" "$link"
+            echo "Replaced symlink: $link → $canonical" >&2 ;;
+        replace-file)
+            rm -f "$link"; ln -s "$canonical" "$link"
+            echo "Replaced regular file: $link → $canonical" >&2 ;;
+        create)
             ln -s "$canonical" "$link"
-            echo "Replaced symlink: $link → $canonical (was → $current)" >&2
-        else
-            die "$link is a symlink to $current. Re-run with --force to replace."
-        fi
-    elif [ -e "$link" ]; then
-        if [ "$force" = true ]; then
-            rm -f "$link"
-            ln -s "$canonical" "$link"
-            echo "Replaced regular file: $link → $canonical" >&2
-        else
-            die "$link exists and is not a symlink. Re-run with --force to replace."
-        fi
-    else
-        ln -s "$canonical" "$link"
-        echo "Installed: $link → $canonical" >&2
-    fi
+            echo "Installed: $link → $canonical" >&2 ;;
+    esac
+
+    # 🚨 SAY WHICH HOST THE INSTALLED COPY WILL TALK TO.
+    #
+    # Installing changes the default host, and that is the one consequence
+    # nobody predicts: the canonical copy lives outside the skills repo, so
+    # _default_subdomain returns LIVE_SUBDOMAIN rather than DEV_SUBDOMAIN. A
+    # developer whose bare `mirc` pointed at the development host finds it
+    # pointing at the released one, with no output that mentioned a host.
+    # install_help explains this; explaining it is not the same as saying it at
+    # the moment it happens (RC-338).
+    echo "" >&2
+    printf 'A bare `mirc` now defaults to https://%s.mimiry.com (installed copy).\n' \
+        "$LIVE_SUBDOMAIN" >&2
+    printf 'Run the repo file directly for https://%s.mimiry.com, or pass --host.\n' \
+        "$DEV_SUBDOMAIN" >&2
 
     # PATH check — the symlink is useless if the prefix isn't on PATH.
     case ":$PATH:" in
