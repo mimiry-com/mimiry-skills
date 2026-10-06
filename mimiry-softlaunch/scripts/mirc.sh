@@ -82,15 +82,82 @@ _default_subdomain() {
     fi
 }
 
+# _resolve_api_base_from_host turns a --host value into a base URL, or refuses.
+#
+# 🚨 THIS IS THE THIRD TIME instance-vs-subdomain has broken this script, and
+# the first time through the FLAG NAME rather than a default value.
+#
+# The flag was `--instance`, and it was correct when chosen (2026-07-16,
+# PROJECT-STATE.md: "matches platform env-instance terminology") — back when a
+# subdomain and an instance name were the same string. D1 separated them five
+# weeks later and the flag name was never revisited. The banner at the top of
+# this file, the help text and two error hints all explained that `--instance`
+# does not take an instance name. Explaining a misleading name is not fixing it:
+# an operator who knows the instance names types one, which is what happened on
+# 2026-10-06:
+#
+#   mirc --instance beta1 ssh register ...   -> Could not resolve host: beta1.mimiry.com
+#   mirc --instance beta  ssh register ...   -> worked
+#
+# 🚨 And "worked" is the dangerous half. `beta` IS an instance name — trunk's —
+# while `beta.mimiry.com` is instance beta1's host. The right destination was
+# reached through a name collision. Anyone meaning trunk who types trunk's real
+# instance name (`beta`) silently reaches a DIFFERENT LIVE INSTANCE.
+#
+# So: the flag is now `--host`, named for what it takes, and a value shaped like
+# an environment identifier is refused rather than turned into a bogus hostname.
+# There is no instance->host resolution here and there must not be: this script
+# ships standalone to end users, and deriving a host from an instance name is
+# the exact coupling that caused all three incidents.
+_resolve_api_base_from_host() {
+    local v="$1"
+    # An explicit URL is used verbatim — an operator pointing at a port, an IP
+    # or localhost is not our business to second-guess.
+    case "$v" in
+        http://*|https://*) _RESOLVED_API_BASE="${v%/}"; return 0 ;;
+    esac
+    # Anything carrying a dot is already a hostname. Checked BEFORE the
+    # identifier refusal below so a real host like `staging-api.example.com`
+    # is not refused for its prefix.
+    #
+    # This also fixes a silent mangle: `--instance beta.mimiry.com` used to
+    # become `https://beta.mimiry.com.mimiry.com`, because the suffix was
+    # appended unconditionally. The hostname is the one value a user can copy
+    # straight out of their browser, so it was the likeliest thing to paste.
+    case "$v" in
+        *.*) _RESOLVED_API_BASE="https://${v%/}"; return 0 ;;
+    esac
+    # 🚨 Convention 4's identifier shape, which can never be a hostname. Someone
+    # passing `staging-beta1` means an instance, and the honest answer is that
+    # this tool does not map instances to hosts — not a DNS failure for
+    # `staging-beta1.mimiry.com`, which blames the network for a category error.
+    case "$v" in
+        dev-*|staging-*|prod-*)
+            die "'$v' looks like a deployment environment identifier, not a host.
+  --host takes a SUBDOMAIN or a HOSTNAME, and an instance name is neither:
+  subdomains are role-named and permanent while the instance behind one
+  changes (decision D1, 2026-08-23). This tool does not map instances to hosts.
+  Pass the host instead, e.g. --host trunk  or  --host beta.mimiry.com,
+  or set MIMIRY_API_BASE=<full-url>."
+            ;;
+    esac
+    _RESOLVED_API_BASE="https://${v}.mimiry.com"
+}
+
 # Overrides, highest precedence first:
-#   1. --instance <subdomain>       e.g.  mirc --instance trunk ssh register ...
-#   2. MIMIRY_API_BASE=<full-url>   e.g.  MIMIRY_API_BASE=https://trunk.mimiry.com mirc ...
+#   1. --host <subdomain|hostname|url>   e.g.  mirc --host trunk ssh register ...
+#   2. MIMIRY_API_BASE=<full-url>        e.g.  MIMIRY_API_BASE=https://trunk.mimiry.com mirc ...
 # Token + key-path caches are segregated per host so switching hosts can't leak
 # stale JWTs.
 _configure_api_base() {
     local api_base
-    if [ -n "${OPT_INSTANCE:-}" ]; then
-        api_base="https://${OPT_INSTANCE}.mimiry.com"
+    if [ -n "${OPT_HOST}" ]; then
+        # Not a command substitution on purpose: `die` inside $(...) exits only
+        # the subshell, so a refusal would print and the script would carry on
+        # with an empty value. The callee assigns a global instead.
+        _RESOLVED_API_BASE=""
+        _resolve_api_base_from_host "$OPT_HOST"
+        api_base="$_RESOLVED_API_BASE"
     elif [ -n "${MIMIRY_API_BASE:-}" ]; then
         api_base="$MIMIRY_API_BASE"
     else
@@ -107,6 +174,32 @@ _configure_api_base() {
     # is a cache that can answer the wrong question.
     TOKEN_FILE="/tmp/mirc-token-$(id -u)-${API_HOST}"
     KEY_FILE="/tmp/mirc-key-$(id -u)-${API_HOST}"
+
+    # 🚨 SAY WHICH HOST, WHENEVER THE DEFAULT WAS OVERRIDDEN.
+    #
+    # The 2026-10-06 incident ended with a key registered on the host the
+    # operator wanted, reached via a value that names a different instance —
+    # and nothing in the output said which host it had been. One line closes
+    # that gap for every future run, and it is the same remedy applied to
+    # admin-cli the same day (RC-337): a tool that resolves a target says which
+    # question it answered. stderr, so `mirc api-base` stays pipeable (it is
+    # read by mimiry-auth.sh).
+    # 🚨 NO `:-` DEFAULT ON OUR OWN VARIABLES, and that is the point.
+    #
+    # The preflight guard below read `${OPT_INSTANCE:-}` after this rename, and
+    # `:-` made the stale name read as empty instead of failing — so the test
+    # silently became a different test. These are initialized unconditionally
+    # before parsing, so referencing them bare means `set -u` turns any future
+    # stale reference into an immediate "unbound variable" rather than a quiet
+    # wrong answer. MIMIRY_API_BASE keeps its `:-` because it is a real
+    # environment variable that may legitimately be unset.
+    if [ -n "${OPT_HOST}" ]; then
+        if [ -n "${OPT_HOST_DEPRECATED}" ]; then
+            printf "⚠ --instance is deprecated and never took an instance name: use --host.\n" >&2
+            printf "  (a subdomain is not an instance name — decision D1; '%s' here is a HOST)\n" "$OPT_HOST" >&2
+        fi
+        printf "→ host: %s\n" "$API_BASE" >&2
+    fi
 }
 
 # _require_json fails with a diagnosis when a response is not JSON.
@@ -131,7 +224,7 @@ _require_json() {
         excerpt=$(printf '%s' "$body" | tr -d '\r' | tr '\n' ' ' | cut -c1-160)
         die "$what: ${API_HOST} did not return JSON${status:+ (HTTP $status)}.
   response: ${excerpt}
-  If this host is wrong, pick another with --instance <subdomain>
+  If this host is wrong, pick another with --host <subdomain|hostname>
   (this run defaulted to $(_default_subdomain).mimiry.com)."
     fi
 }
@@ -149,7 +242,7 @@ _require_json() {
 # copy takes today. It is the difference between a user reading
 #
 #   error: mimiry: alpha.mimiry.com does not resolve — the alpha instance is
-#          not live yet. Use --instance trunk, or MIMIRY_API_BASE=<url>.
+#          not live yet. Use --host trunk, or MIMIRY_API_BASE=<url>.
 #
 # and the two previous incidents, whose only symptom was a jq parse error.
 _PREFLIGHT_DONE=""
@@ -173,10 +266,15 @@ _preflight_host() {
         return 0   # no resolver tool — say nothing rather than guess
     fi
 
-    local hint="  Pick a host with --instance <subdomain>, or set MIMIRY_API_BASE=<full-url>."
-    if [ -z "${OPT_INSTANCE:-}${MIMIRY_API_BASE:-}" ] && [ "$API_HOST" = "${LIVE_SUBDOMAIN}.mimiry.com" ]; then
+    local hint="  Pick a host with --host <subdomain|hostname>, or set MIMIRY_API_BASE=<full-url>."
+    # 🚨 OPT_HOST, not OPT_INSTANCE. This guard asks "was the host defaulted?",
+    # and when the variable it reads no longer exists the test silently becomes
+    # "was MIMIRY_API_BASE unset?" — so an explicit `--host alpha` would be
+    # told the alpha instance is not live yet "because you did not choose a
+    # host", when choosing it is exactly what the user did.
+    if [ -z "${OPT_HOST}${MIMIRY_API_BASE:-}" ] && [ "$API_HOST" = "${LIVE_SUBDOMAIN}.mimiry.com" ]; then
         hint="  The '${LIVE_SUBDOMAIN}' instance is not live yet — there is no released instance today.
-  Use '--instance ${DEV_SUBDOMAIN}' to reach the rolling development host."
+  Use '--host ${DEV_SUBDOMAIN}' to reach the rolling development host."
     fi
     die "${API_HOST} does not resolve (no DNS record), so no request was attempted.
 ${hint}"
@@ -220,11 +318,18 @@ Commands:
 
 Global options:
   --key <path>       Path to SSH key (required on first use, remembered after)
-  --instance <sub>   Target a host by SUBDOMAIN, e.g.
-                       --instance trunk  ->  https://trunk.mimiry.com
-                     A subdomain is NOT a deployment instance name; they have
-                     been separate since 2026-08-23. Overrides MIMIRY_API_BASE.
+  --host <target>    Which host to talk to. Takes a subdomain, a hostname or a
+                     full URL:
+                       --host trunk             ->  https://trunk.mimiry.com
+                       --host beta.mimiry.com   ->  https://beta.mimiry.com
+                       --host http://localhost:8080
+                     NOT a deployment instance name — subdomains are role-named
+                     and permanent while the instance behind one changes
+                     (decision D1). An identifier like 'staging-beta1' is
+                     refused rather than guessed at. Overrides MIMIRY_API_BASE.
                      Token + key cache is segregated per host.
+  --instance <t>     DEPRECATED alias for --host. It never took an instance
+                     name despite the spelling; it warns and keeps working.
   --help, -h         Show this help message (works at every level)
 
 Discover more:
@@ -265,7 +370,7 @@ EOF
         printf '   (installed skill copy)\n'
         if ! getent hosts "${sub}.mimiry.com" >/dev/null 2>&1; then
             printf "  ⚠ %s.mimiry.com does not resolve — that instance is not live yet.\n" "$sub"
-            printf "    Use '--instance %s' to reach the rolling development host.\n" "$DEV_SUBDOMAIN"
+            printf "    Use '--host %s' to reach the rolling development host.\n" "$DEV_SUBDOMAIN"
         fi
     fi
     exit 0
@@ -313,7 +418,7 @@ Note on which host the installed `mirc` talks to:
 
   So on a developer machine the two can point at different hosts. That is
   deliberate: `mirc install` produces the artifact an end user gets. Use
-  '--instance <subdomain>' on either to override.
+  '--host <subdomain|hostname>' on either to override.
 EOF
     exit 0
 }
@@ -2460,7 +2565,10 @@ cmd_ssh() {
 # ── Argument parsing ─────────────────────────────────────────────────
 
 OPT_KEY=""
-OPT_INSTANCE=""
+OPT_HOST=""
+# Set when the host came from the deprecated --instance spelling, so the warning
+# names the flag the user actually typed rather than the one they should have.
+OPT_HOST_DEPRECATED=""
 CMD=""
 CMD_ARGS=()
 
@@ -2476,7 +2584,13 @@ while [ $# -gt 0 ]; do
                     OPT_KEY="${2:?'--key' requires a path}"; shift 2
                 fi
                 ;;
-            --instance) OPT_INSTANCE="${2:?'--instance' requires a SUBDOMAIN (e.g. trunk)}"; shift 2 ;;
+            --host)     OPT_HOST="${2:?'--host' requires a SUBDOMAIN or HOSTNAME (e.g. trunk, or beta.mimiry.com)}"; shift 2 ;;
+            # Deprecated spelling, kept working: docs, PROJECT-STATE and
+            # plans/beta-demo/demo-ssh-volume.sh all use it, and breaking an
+            # operator's muscle memory to fix a name is a worse trade than
+            # warning them. It takes the same values it always did.
+            --instance) OPT_HOST="${2:?'--instance' requires a SUBDOMAIN or HOSTNAME — it never took an instance name; use --host}"
+                        OPT_HOST_DEPRECATED=1; shift 2 ;;
             *)          CMD_ARGS+=("$1"); shift ;;
         esac
         continue
@@ -2484,7 +2598,9 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --help|-h)  usage ;;
         --key)      OPT_KEY="${2:?'--key' requires a path}"; shift 2 ;;
-        --instance) OPT_INSTANCE="${2:?'--instance' requires a SUBDOMAIN (e.g. trunk)}"; shift 2 ;;
+        --host)     OPT_HOST="${2:?'--host' requires a SUBDOMAIN or HOSTNAME (e.g. trunk, or beta.mimiry.com)}"; shift 2 ;;
+        --instance) OPT_HOST="${2:?'--instance' requires a SUBDOMAIN or HOSTNAME — it never took an instance name; use --host}"
+                    OPT_HOST_DEPRECATED=1; shift 2 ;;
         -*)         die "unknown option: $1" ;;
         *)          CMD="$1"; shift ;;
     esac
