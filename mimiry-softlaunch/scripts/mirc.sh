@@ -172,7 +172,14 @@ _configure_api_base() {
     # for — so changing the default subdomain silently repurposed an existing
     # token for a different host. A cache whose key omits the thing that varies
     # is a cache that can answer the wrong question.
-    TOKEN_FILE="/tmp/mirc-token-$(id -u)-${API_HOST}"
+    #
+    # And suffixed by KEY, which is the same lesson one level along: the token
+    # cache was keyed by host only, so `mirc --key B` within 55 minutes of a
+    # sign-in with key A answered as A's account — the wrong identity, with
+    # nothing on screen to say so. TOKEN_FILE is completed in resolve_key, once
+    # the key is known; the remembered key path stays per host on purpose.
+    TOKEN_PREFIX="/tmp/mirc-token-$(id -u)-${API_HOST}"
+    TOKEN_FILE=""
     KEY_FILE="/tmp/mirc-key-$(id -u)-${API_HOST}"
 
     # 🚨 SAY WHICH HOST, WHENEVER THE DEFAULT WAS OVERRIDDEN.
@@ -311,6 +318,7 @@ sessions and persistent block volumes, query GPU availability.
 Commands:
   auth                   Authenticate and print token info
   api-base               Print the API base URL this invocation resolves to
+  token-path             Print the token cache file this invocation would use
   install                Symlink mirc into a user-space PATH directory
   session <subcommand>   Compute session operations
   volume  <subcommand>   Block volume operations
@@ -327,7 +335,8 @@ Global options:
                      and permanent while the instance behind one changes
                      (decision D1). An identifier like 'staging-beta1' is
                      refused rather than guessed at. Overrides MIMIRY_API_BASE.
-                     Token + key cache is segregated per host.
+                     The token cache is per host and per key; the
+                     remembered key path is per host.
   --instance <t>     DEPRECATED alias for --host. It never took an instance
                      name despite the spelling; it warns and keeps working.
   --help, -h         Show this help message (works at every level)
@@ -887,7 +896,20 @@ resolve_key() {
     [ -f "$SSH_KEY" ] || die "SSH private key not found: $SSH_KEY"
     [ -f "${SSH_KEY}.pub" ] || die "public key not found: ${SSH_KEY}.pub"
 
-    echo "$SSH_KEY" > "$KEY_FILE"
+    # token-path only reports; it must not change which key is remembered.
+    [ -n "${RESOLVE_ONLY:-}" ] || echo "$SSH_KEY" > "$KEY_FILE"
+
+    # The key's identity is its public-key blob (the comment can change without
+    # the key changing). Hashed, because the blob is too long for a filename.
+    local blob key_id
+    blob=$(awk 'NR == 1 { print $2 }' "${SSH_KEY}.pub")
+    [ -n "$blob" ] || die "could not read a public key from ${SSH_KEY}.pub"
+    key_id=$(printf '%s' "$blob" | sha256sum | cut -c1-16)
+    TOKEN_FILE="${TOKEN_PREFIX}-${key_id}"
+
+    # The host-only cache from before tokens were keyed by key. Its token
+    # belongs to whichever key signed in last, so nothing may read it again.
+    [ -n "${RESOLVE_ONLY:-}" ] || rm -f "$TOKEN_PREFIX"
 }
 
 # Ensure we have a valid (non-expired) token. Authenticates if needed.
@@ -2656,6 +2678,8 @@ case "$CMD" in
     # incidents. It is also the single definition that mimiry-auth.sh reads,
     # so the two scripts cannot drift apart on the default host.
     api-base) printf '%s\n' "$API_BASE" ;;
+    # Which cached token would be used: per host AND per key. No network.
+    token-path) RESOLVE_ONLY=1 resolve_key; printf '%s\n' "$TOKEN_FILE" ;;
     auth)    cmd_auth "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
     install) cmd_install "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
     session) cmd_session "${CMD_ARGS[@]+"${CMD_ARGS[@]}"}" ;;
